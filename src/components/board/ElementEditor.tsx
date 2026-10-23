@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useBoardStore } from '@/lib/board/store'
 import type { BoardElement, FuncElement, StickyElement, TextElement } from '@/lib/board/types'
-import FuncEditor, { withExpr, type FuncStampApi, type FuncView } from './FuncEditor'
+import FuncEditor, { withExpr, isCoarsePointer, type FuncStampApi, type FuncView } from './FuncEditor'
 import { uid } from '@/lib/board/utils'
 
 export default function ElementEditor() {
@@ -203,7 +203,9 @@ export default function ElementEditor() {
     }
     if (cur?.type === 'text') applyStamp(cur)
     setFuncOpen(false)
-    taRef.current?.focus()
+    // touch devices: do not re-focus — the system keyboard would pop up again;
+    // it returns on a direct tap into the textarea
+    if (!isCoarsePointer()) taRef.current?.focus()
   }, [applyStamp])
 
   useEffect(() => {
@@ -214,15 +216,23 @@ export default function ElementEditor() {
     if (!initialRef.current || initialRef.current.id !== el.id) {
       initialRef.current = el
       // focus only when the editing session starts (never steal focus back
-      // from the [func] panel while typing there)
+      // from the [func] panel while typing there). On touch devices skip the
+      // autofocus when the [func] panel is open — the system keyboard would
+      // cover half the screen; it returns on a direct tap into the field.
       const ta = taRef.current
-      if (ta) {
+      if (ta && !(isCoarsePointer() && funcOpenRef.current)) {
         ta.focus()
         const len = ta.value.length
         ta.setSelectionRange(len, len)
       }
     }
   }, [el])
+
+  // [func] panel opened while typing on a touch device -> fold the system
+  // keyboard away; the panel's keypad edits the expression without focus
+  useEffect(() => {
+    if (funcOpen && isCoarsePointer()) taRef.current?.blur()
+  }, [funcOpen])
 
   // Tap/press anywhere outside the textarea -> save & close the editor.
   // Document-level capture listener: the canvas preventDefault()s pointerdown,

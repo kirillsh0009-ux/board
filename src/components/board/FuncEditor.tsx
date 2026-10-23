@@ -5,6 +5,11 @@ import { X, Plus, Minus, RotateCcw } from 'lucide-react'
 import { compileAll, niceStep, fmtTick, splitExprs } from '@/lib/board/funcplot'
 import type { TextElement } from '@/lib/board/types'
 
+/** coarse pointer (iPad/phone): the on-screen keyboard must appear only on a
+ *  direct tap into an input field — read lazily (pointer can change at runtime) */
+export const isCoarsePointer = () =>
+  window.matchMedia?.('(pointer: coarse)')?.matches ?? false
+
 const COLORS = ['#e11d48', '#059669', '#d97706', '#7c3aed', '#0891b2', '#65a30d']
 const FUNC_TOKEN = '[func]'
 
@@ -153,11 +158,31 @@ export default function FuncEditor({ el, initial, seed, anchor, viewport, contai
   const firstError = fns.find((f) => f.error)?.error ?? null
   const hasAnything = splitExprs(expr).length > 0
 
-  // focus the expression input on open ("курсор переключается в окошко")
+  // coarse pointer: skip the autofocus — the system keyboard would cover half
+  // the screen. Desktop keeps it ("курсор переключается в окошко").
   useEffect(() => {
+    if (isCoarsePointer()) return
     const t = setTimeout(() => inputRef.current?.focus(), 30)
     return () => clearTimeout(t)
   }, [])
+
+  // virtual caret: keypad edits track the selection even while the input is
+  // unfocused (no focus() — it would pop the system keyboard)
+  const caretRef = useRef({ s: -1, e: -1 })
+  const trackCaret = (el: HTMLInputElement) => {
+    caretRef.current = {
+      s: el.selectionStart ?? el.value.length,
+      e: el.selectionEnd ?? el.selectionStart ?? el.value.length,
+    }
+  }
+  const caretOf = (input: HTMLInputElement): { s: number; e: number } => {
+    if (document.activeElement === input) {
+      const s = input.selectionStart ?? input.value.length
+      return { s, e: input.selectionEnd ?? s }
+    }
+    const c = caretRef.current
+    return c.s >= 0 ? c : { s: input.value.length, e: input.value.length }
+  }
 
   /** (text mode) write expression back into the element text (debounced) */
   useEffect(() => {
@@ -372,6 +397,7 @@ export default function FuncEditor({ el, initial, seed, anchor, viewport, contai
 
   const onCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.preventDefault()
+    inputRef.current?.blur() // fold the system keyboard when panning the graph
     try {
       ;(e.target as HTMLCanvasElement).setPointerCapture(e.pointerId)
     } catch {
@@ -423,14 +449,16 @@ export default function FuncEditor({ el, initial, seed, anchor, viewport, contai
       setExpr((e) => e + str)
       return
     }
-    const s = input.selectionStart ?? input.value.length
-    const eEnd = input.selectionEnd ?? s
+    const { s, e: eEnd } = caretOf(input)
     const next = input.value.slice(0, s) + str + input.value.slice(eEnd)
+    const pos = s + str.length - caretBack
+    caretRef.current = { s: pos, e: pos }
     setExpr(next)
     requestAnimationFrame(() => {
-      input.focus()
-      const pos = s + str.length - caretBack
-      input.setSelectionRange(pos, pos)
+      // focus() would pop the system keyboard on touch devices; restore the
+      // caret only when the input is already focused (desktop or direct tap)
+      if (!isCoarsePointer()) input.focus()
+      if (document.activeElement === input) input.setSelectionRange(pos, pos)
     })
   }
 
@@ -441,21 +469,22 @@ export default function FuncEditor({ el, initial, seed, anchor, viewport, contai
       setExpr((e) => e.slice(0, -1))
       return
     }
-    const s = input.selectionStart ?? input.value.length
-    const eEnd = input.selectionEnd ?? s
+    const { s, e: eEnd } = caretOf(input)
     if (s !== eEnd) {
       const next = input.value.slice(0, s) + input.value.slice(eEnd)
+      caretRef.current = { s, e: s }
       setExpr(next)
       requestAnimationFrame(() => {
-        input.focus()
-        input.setSelectionRange(s, s)
+        if (!isCoarsePointer()) input.focus()
+        if (document.activeElement === input) input.setSelectionRange(s, s)
       })
     } else if (s > 0) {
       const next = input.value.slice(0, s - 1) + input.value.slice(s)
+      caretRef.current = { s: s - 1, e: s - 1 }
       setExpr(next)
       requestAnimationFrame(() => {
-        input.focus()
-        input.setSelectionRange(s - 1, s - 1)
+        if (!isCoarsePointer()) input.focus()
+        if (document.activeElement === input) input.setSelectionRange(s - 1, s - 1)
       })
     }
   }
@@ -557,6 +586,14 @@ export default function FuncEditor({ el, initial, seed, anchor, viewport, contai
           ref={inputRef}
           data-testid="func-input"
           value={expr}
+          inputMode="none"
+          onPointerDown={(e) => {
+            // the system keyboard appears only on a direct tap into the field
+            e.currentTarget.setAttribute('inputmode', 'text')
+          }}
+          onSelect={(e) => trackCaret(e.currentTarget)}
+          onFocus={(e) => trackCaret(e.currentTarget)}
+          onBlur={(e) => trackCaret(e.currentTarget)}
           onChange={(e) => {
             markDirty()
             setExpr(e.target.value)
