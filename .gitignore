@@ -69,3 +69,4 @@ package-lock.json.bak
 /worklog.md
 /Caddyfile
 /bun.lock
+.vercel
