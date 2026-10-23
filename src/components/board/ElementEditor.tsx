@@ -1,9 +1,9 @@
 'use client'
 
-import { useCallback, useEffect, useRef } from 'react'
-import { useBoardStore, net } from '@/lib/board/store'
-import { toWire } from '@/lib/board/wire'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useBoardStore } from '@/lib/board/store'
 import type { BoardElement, StickyElement, TextElement } from '@/lib/board/types'
+import FuncEditor, { withExpr } from './FuncEditor'
 
 export default function ElementEditor() {
   const editingId = useBoardStore((s) => s.editingId)
@@ -13,9 +13,21 @@ export default function ElementEditor() {
 
   const initialRef = useRef<BoardElement | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const funcPanelRef = useRef<HTMLDivElement | null>(null)
   const lastEmit = useRef(0)
+  const [funcOpen, setFuncOpen] = useState(false)
 
   const el = editingId ? elements.get(editingId) : null
+  const isText = el?.type === 'text'
+  const hasFunc = isText && (el as TextElement).text.includes('[func]')
+
+  // [func] token appeared -> open the editor; token removed -> close it.
+  // (state adjustment during render — the sanctioned alternative to setState-in-effect)
+  const [prevHasFunc, setPrevHasFunc] = useState(false)
+  if (hasFunc !== prevHasFunc) {
+    setPrevHasFunc(hasFunc)
+    setFuncOpen(hasFunc)
+  }
 
   /** save & close; reads everything from the store so it never works on stale data */
   const commit = useCallback(() => {
@@ -33,9 +45,8 @@ export default function ElementEditor() {
       } else {
         const trimmed = { ...current, text: current.text.replace(/\s+$/g, '') } as StickyElement | TextElement
         s.updateLocal([trimmed])
-        if (net.socket?.connected) {
-          net.socket.emit('element:update', { boardId: net.boardId, element: toWire(trimmed) })
-        }
+        // broadcast + persist (persistUpdate: realtime event + batch queue)
+        s.broadcastUpdate([trimmed])
         if (before) {
           s.pushOp({ kind: 'update', before, after: trimmed })
         }
@@ -45,27 +56,54 @@ export default function ElementEditor() {
     s.setEditing(null)
   }, [])
 
+  /** FuncEditor writes the expression back into the live store element */
+  const onFuncWriteText = useCallback((expr: string) => {
+    const s = useBoardStore.getState()
+    const id = s.editingId
+    if (!id) return
+    const cur = s.elements.get(id)
+    if (!cur || cur.type !== 'text') return
+    const newText = withExpr(cur.text, expr)
+    if (newText === cur.text) return
+    const updated = { ...cur, text: newText } as TextElement
+    s.updateLocal([updated])
+    s.broadcastUpdate([updated])
+  }, [])
+
+  const onFuncClose = useCallback(() => {
+    setFuncOpen(false)
+    taRef.current?.focus()
+  }, [])
+
   useEffect(() => {
-    if (el && (!initialRef.current || initialRef.current.id !== el.id)) {
+    if (!el) {
+      initialRef.current = null
+      return
+    }
+    if (!initialRef.current || initialRef.current.id !== el.id) {
       initialRef.current = el
+      // focus only when the editing session starts (never steal focus back
+      // from the [func] panel while typing there)
+      const ta = taRef.current
+      if (ta) {
+        ta.focus()
+        const len = ta.value.length
+        ta.setSelectionRange(len, len)
+      }
     }
-    if (el && taRef.current) {
-      taRef.current.focus()
-      const len = taRef.current.value.length
-      taRef.current.setSelectionRange(len, len)
-    }
-    if (!el) initialRef.current = null
   }, [el])
 
   // Tap/press anywhere outside the textarea -> save & close the editor.
   // Document-level capture listener: the canvas preventDefault()s pointerdown,
   // which suppresses the natural focus change, so textarea onBlur alone never fires.
   // Capture phase also wins over the canvas handler running later.
+  // Taps inside the [func] panel are ignored (the panel manages its own closing).
   useEffect(() => {
     if (!editingId) return
     const onDocPointerDown = (e: PointerEvent) => {
       const ta = taRef.current
       if (ta && e.target instanceof Node && ta.contains(e.target)) return // taps inside the editor are fine
+      if (funcPanelRef.current && e.target instanceof Node && funcPanelRef.current.contains(e.target)) return
       commit()
     }
     document.addEventListener('pointerdown', onDocPointerDown, true)
@@ -88,9 +126,9 @@ export default function ElementEditor() {
         : ({ ...(current as TextElement), text: value } as TextElement)
     s.updateLocal([updated])
     const now = Date.now()
-    if (now - lastEmit.current > 300 && net.socket?.connected) {
+    if (now - lastEmit.current > 300) {
       lastEmit.current = now
-      net.socket.emit('element:update', { boardId: net.boardId, element: toWire(updated) })
+      s.broadcastUpdate([updated])
     }
   }
 
@@ -111,16 +149,29 @@ export default function ElementEditor() {
             ta.style.height = `${ta.scrollHeight}px`
           }
         }}
-        onBlur={commit}
+        onBlur={(e) => {
+          // focus moved into the [func] panel -> keep editing (outside taps are
+          // handled by the document capture listener)
+          if (funcOpen) {
+            e.preventDefault()
+            return
+          }
+          commit()
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Escape') {
             e.preventDefault()
-            ;(e.target as HTMLTextAreaElement).blur()
+            if (funcOpen) {
+              setFuncOpen(false)
+              ;(e.target as HTMLTextAreaElement).focus()
+            } else {
+              ;(e.target as HTMLTextAreaElement).blur()
+            }
           }
           e.stopPropagation()
         }}
         aria-label={isSticky ? 'Текст стикера' : 'Текст'}
-        placeholder={isSticky ? 'Введите текст…' : 'Введите текст…'}
+        placeholder={isSticky ? 'Введите текст…' : 'Введите текст… (подсказка: [func] — график функции)'}
         className={
           isSticky
             ? 'pointer-events-auto absolute resize-none rounded-md border-2 border-zinc-800/80 shadow-xl outline-none placeholder:text-zinc-500'
@@ -140,6 +191,16 @@ export default function ElementEditor() {
           padding: isSticky ? `${9 * camera.zoom}px ${10 * camera.zoom}px` : '0 2px',
         }}
       />
+      {isText && funcOpen ? (
+        <FuncEditor
+          el={el as TextElement}
+          anchor={{ sx, sy }}
+          viewport={viewport}
+          containerRef={funcPanelRef}
+          onClose={onFuncClose}
+          onWriteText={onFuncWriteText}
+        />
+      ) : null}
     </div>
   )
 }

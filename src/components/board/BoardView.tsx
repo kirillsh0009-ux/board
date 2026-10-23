@@ -87,6 +87,8 @@ export default function BoardView({ boardId }: { boardId: string }) {
     const meLoaded = loadMe()
     init(boardId, meLoaded)
     net.boardId = boardId
+    // debug handle for E2E diagnostics
+    ;(window as unknown as { __board?: unknown }).__board = useBoardStore
   }, [boardId])
 
   const fitToContent = useCallback(
