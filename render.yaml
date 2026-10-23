@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: coop-board
+    runtime: node
+    plan: free
+    buildCommand: npm install && npx prisma db push --schema prisma/schema.prod.prisma --accept-data-loss && npx prisma generate --schema prisma/schema.prod.prisma && npx next build
+    startCommand: node prod-server.mjs
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=460
+      # PostgreSQL connection string (Neon / Supabase free tier)
+      - key: DATABASE_URL
+        sync: false
+      # WS is mounted on the same origin by prod-server.mjs
+      - key: NEXT_PUBLIC_WS_URL
+        value: ""
+      - key: NEXT_PUBLIC_WS_PATH
+        value: /socket.io
