@@ -73,8 +73,17 @@ export default function BoardCanvas() {
       for (const [key, d] of remoteDrafts) {
         if (now - d.ts > 8000) remoteDrafts.delete(key)
       }
+      // the func stamp being edited is hidden while its editor panel is open
+      let els: Iterable<BoardElement> = s.elements.values()
+      if (s.editingId) {
+        const ed = s.elements.get(s.editingId)
+        if (ed?.type === 'func') {
+          const editId = s.editingId
+          els = Array.from(s.elements.values()).filter((e) => e.id !== editId)
+        }
+      }
       renderBoard(ctx, s.viewport.w, s.viewport.h, window.devicePixelRatio || 1, s.camera, {
-        elements: s.elements.values(),
+        elements: els,
         drafts: Array.from(remoteDrafts, ([id, d]) => ({ ...d, id })),
         localDraft: localDraft.current,
       })
@@ -245,7 +254,7 @@ export default function BoardCanvas() {
           Math.hypot(p.sx - lastTap.current.x, p.sy - lastTap.current.y) < 24 &&
           lastTap.current.id === hit.id
         lastTap.current = { time: now, x: p.sx, y: p.sy, id: hit.id }
-        if ((hit.type === 'sticky' || hit.type === 'text') && (isDoubleTap || s.selectedId === hit.id)) {
+        if ((hit.type === 'sticky' || hit.type === 'text' || hit.type === 'func') && (isDoubleTap || s.selectedId === hit.id)) {
           s.select(hit.id)
           s.setEditing(hit.id)
           mode.current = 'none'

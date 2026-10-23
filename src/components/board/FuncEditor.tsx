@@ -17,14 +17,45 @@ export function extractFuncExpr(text: string): string {
   return (lineEnd === -1 ? rest : rest.slice(0, lineEnd)).trim()
 }
 
+/** graph view stored inside a func stamp (math center + px per unit) */
+export interface FuncView {
+  cx: number
+  cy: number
+  scale: number
+}
+
+/** everything the owner needs to stamp the currently visible graph onto the board */
+export interface FuncStampData {
+  expr: string
+  view: FuncView
+  /** graph canvas top-left in viewport (overlay) coordinates */
+  sx: number
+  sy: number
+  /** graph canvas CSS size */
+  w: number
+  h: number
+  /** PNG dataURL of the visible graph (rounded corners + frame baked in) */
+  img: string | null
+  /** at least one valid expression is plotted */
+  valid: boolean
+}
+
+export interface FuncStampApi {
+  getStamp: () => FuncStampData | null
+}
+
 interface FuncEditorProps {
-  el: TextElement
+  el?: TextElement
+  /** stamp re-edit mode: seed expr/view/size from an existing func element */
+  initial?: { expr: string; view: FuncView; w: number; h: number }
   anchor: { sx: number; sy: number }
   viewport: { w: number; h: number }
   containerRef: React.RefObject<HTMLDivElement | null>
+  /** registered with getStamp() every render — call it before closing to stamp */
+  stampApiRef?: React.MutableRefObject<FuncStampApi | null>
   onClose: () => void
-  /** writes the new element text back into the store (broadcast + persist) */
-  onWriteText: (newText: string) => void
+  /** (text mode) writes the new element text back into the store */
+  onWriteText?: (newText: string) => void
 }
 
 /** build the new element text: replace the segment after the [func] token on its line */
@@ -35,6 +66,45 @@ export function withExpr(text: string, expr: string): string {
   const lineEnd = text.indexOf('\n', idx)
   const at = idx + FUNC_TOKEN.length
   return text.slice(0, at) + seg + (lineEnd === -1 ? '' : text.slice(lineEnd))
+}
+
+/** PNG snapshot with rounded corners + border baked in (corners transparent) */
+function snapshotWithFrame(canvas: HTMLCanvasElement): string | null {
+  const off = document.createElement('canvas')
+  off.width = canvas.width
+  off.height = canvas.height
+  const ctx = off.getContext('2d')
+  if (!ctx) return null
+  ctx.drawImage(canvas, 0, 0)
+  const cssW = canvas.getBoundingClientRect().width || canvas.width
+  const px = canvas.width / cssW // device scale
+  const r = 8 * px
+  const lw = Math.max(1, Math.round(px))
+  ctx.globalCompositeOperation = 'destination-in'
+  rrPath(ctx, 0, 0, canvas.width, canvas.height, r)
+  ctx.fillStyle = '#ffffff'
+  ctx.fill()
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.strokeStyle = '#d4d4d8'
+  ctx.lineWidth = lw
+  rrPath(ctx, lw / 2, lw / 2, canvas.width - lw, canvas.height - lw, r)
+  ctx.stroke()
+  return off.toDataURL('image/png')
+}
+
+function rrPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2))
+  ctx.beginPath()
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, h, rr)
+  } else {
+    ctx.moveTo(x + rr, y)
+    ctx.arcTo(x + w, y, x + w, y + h, rr)
+    ctx.arcTo(x + w, y + h, x, y + h, rr)
+    ctx.arcTo(x, y + h, x, y, rr)
+    ctx.arcTo(x, y, x + w, y, rr)
+    ctx.closePath()
+  }
 }
 
 /** marching squares case table: bit 1=v00, 2=v10, 4=v11, 8=v01; edges 0=bottom,1=right,2=top,3=left */
@@ -57,10 +127,13 @@ const CASE_SEGS: Array<Array<[number, number]>> = [
   [],
 ]
 
-export default function FuncEditor({ el, anchor, viewport, containerRef, onClose, onWriteText }: FuncEditorProps) {
-  const [expr, setExpr] = useState(() => extractFuncExpr(el.text))
-  const [size, setSize] = useState({ w: 440, h: 250 })
-  const [view, setView] = useState({ cx: 0, cy: 0, scale: 440 / 13 })
+export default function FuncEditor({ el, initial, anchor, viewport, containerRef, stampApiRef, onClose, onWriteText }: FuncEditorProps) {
+  const isStamp = initial !== undefined
+  const [expr, setExpr] = useState(() => (initial ? initial.expr : el ? extractFuncExpr(el.text) : ''))
+  const [size, setSize] = useState(() => (initial ? { w: initial.w, h: initial.h } : { w: 440, h: 250 }))
+  const [view, setView] = useState<FuncView>(() =>
+    initial ? { ...initial.view } : { cx: 0, cy: 0, scale: 440 / 13 }
+  )
   const inputRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rafRef = useRef(0)
@@ -83,26 +156,28 @@ export default function FuncEditor({ el, anchor, viewport, containerRef, onClose
     return () => clearTimeout(t)
   }, [])
 
-  /** write expression back into the element text (debounced; onWriteText applies to the live store element) */
+  /** (text mode) write expression back into the element text (debounced) */
   useEffect(() => {
+    if (isStamp) return
     if (expr === appliedRef.current) return
     const t = setTimeout(() => {
       appliedRef.current = expr
       dirtyRef.current = false
-      onWriteText(expr)
+      onWriteText?.(expr)
     }, 400)
     return () => clearTimeout(t)
-  }, [expr])
+  }, [expr, isStamp, onWriteText])
 
-  /** final write on close/unmount (expr via ref — the closure would be stale) */
+  /** (text mode) final write on close/unmount (expr via ref — the closure would be stale) */
   useEffect(() => {
+    if (isStamp) return
     return () => {
       if (dirtyRef.current) {
         dirtyRef.current = false
-        onWriteText(exprRef.current)
+        onWriteText?.(exprRef.current)
       }
     }
-  }, [])
+  }, [isStamp, onWriteText])
 
   const markDirty = useCallback(() => {
     dirtyRef.current = true
@@ -294,7 +369,11 @@ export default function FuncEditor({ el, anchor, viewport, containerRef, onClose
 
   const onCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.preventDefault()
-    ;(e.target as HTMLCanvasElement).setPointerCapture(e.pointerId)
+    try {
+      ;(e.target as HTMLCanvasElement).setPointerCapture(e.pointerId)
+    } catch {
+      // pointer may already be released (or synthetic) — the drag still works
+    }
     dragRef.current = { x: e.clientX, y: e.clientY }
   }
   const onCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -312,7 +391,11 @@ export default function FuncEditor({ el, anchor, viewport, containerRef, onClose
   const onResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
-    ;(e.target as HTMLDivElement).setPointerCapture(e.pointerId)
+    try {
+      ;(e.target as HTMLDivElement).setPointerCapture(e.pointerId)
+    } catch {
+      // pointer may already be released (or synthetic) — the resize still works
+    }
     resizeRef.current = { x: e.clientX, y: e.clientY, w: size.w, h: size.h }
   }
   const onResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -377,17 +460,63 @@ export default function FuncEditor({ el, anchor, viewport, containerRef, onClose
   // ---- panel position ------------------------------------------------------
   const panelW = size.w + 28
   const narrow = viewport.w < 640
-  const left = narrow ? Math.max(8, (viewport.w - panelW) / 2) : Math.max(8, Math.min(anchor.sx + 22, viewport.w - panelW - 10))
-  const top = narrow ? 72 : Math.max(60, Math.min(anchor.sy - 10, viewport.h - 200))
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+  // text mode: panel to the right of the text anchor; stamp mode: cover the stamp
+  const left = narrow
+    ? clamp((viewport.w - panelW) / 2, 8, Math.max(8, viewport.w - panelW - 10))
+    : clamp(initial ? anchor.sx - 13 : anchor.sx + 22, 8, Math.max(8, viewport.w - panelW - 10))
+  const top = narrow
+    ? 72
+    : clamp(initial ? anchor.sy - 96 : anchor.sy - 10, 60, Math.max(60, viewport.h - 200))
+
+  // ---- stamp API: fresh closure every render (reads left/top/size/view) ----
+  useEffect(() => {
+    if (!stampApiRef) return
+    stampApiRef.current = {
+      getStamp: () => {
+        const canvas = canvasRef.current
+        if (!canvas) return null
+        let img: string | null = null
+        try {
+          img = snapshotWithFrame(canvas)
+        } catch {
+          img = null
+        }
+        // canvas offset inside the panel -> panel position is known in viewport coords
+        const panel = containerRef.current
+        const rect = canvas.getBoundingClientRect()
+        let dx = 13
+        let dy = 100
+        if (panel) {
+          const pr = panel.getBoundingClientRect()
+          dx = rect.left - pr.left
+          dy = rect.top - pr.top
+        }
+        return {
+          expr,
+          view: { ...view },
+          sx: left + dx,
+          sy: top + dy,
+          w: size.w,
+          h: size.h,
+          img,
+          valid: fns.some((f) => !f.error && f.raw),
+        }
+      },
+    }
+    return () => {
+      stampApiRef.current = null
+    }
+  })
 
   return (
     <div
       ref={containerRef}
       role="dialog"
-      aria-label="Редактор функции"
+      aria-label={isStamp ? 'Редактирование графика' : 'Редактор функции'}
       data-testid="func-editor"
-      className="pointer-events-auto absolute rounded-xl border border-zinc-200 bg-white shadow-2xl"
-      style={{ left, top, width: panelW, maxHeight: 'calc(100dvh - 80px)' }}
+      className="pointer-events-auto absolute flex flex-col rounded-xl border border-zinc-200 bg-white shadow-2xl"
+      style={{ left, top, width: panelW, maxHeight: Math.max(240, viewport.h - top - 16) }}
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
           e.preventDefault()
@@ -401,7 +530,7 @@ export default function FuncEditor({ el, anchor, viewport, containerRef, onClose
       <div className="flex items-center justify-between rounded-t-xl border-b border-zinc-100 bg-zinc-50/80 px-3 py-2">
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700">
           <span className="flex h-6 w-6 items-center justify-center rounded-md bg-zinc-800 font-serif italic text-white">ƒ</span>
-          График функции
+          {isStamp ? 'Редактирование графика' : 'График функции'}
         </div>
         <div className="flex items-center gap-0.5">
           <button type="button" aria-label="Отдалить график" onClick={() => zoomBy(1 / 1.3)} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
@@ -419,7 +548,7 @@ export default function FuncEditor({ el, anchor, viewport, containerRef, onClose
         </div>
       </div>
 
-      <div className="overflow-y-auto overflow-x-hidden px-3 pb-3 pt-2">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-3 pt-2">
         {/* expression input */}
         <input
           ref={inputRef}
@@ -509,6 +638,10 @@ export default function FuncEditor({ el, anchor, viewport, containerRef, onClose
             </button>
           ))}
         </div>
+
+        <p className="mt-2 text-[11px] leading-4 text-zinc-400">
+          Тап мимо окна — график отпечатается на доску (та часть, что видна сейчас). Тап по отпечатку — снова открыть редактор.
+        </p>
       </div>
     </div>
   )

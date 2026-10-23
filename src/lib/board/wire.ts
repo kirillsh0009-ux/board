@@ -43,6 +43,16 @@ export function fromWire(raw: WireElement | Partial<BoardElement>): BoardElement
       if (!(num(rest.x) && num(rest.y) && num(rest.size))) return null
       if (typeof rest.color !== 'string' || typeof rest.text !== 'string') return null
       break
+    case 'func': {
+      if (!(num(rest.x) && num(rest.y) && num(rest.w) && num(rest.h))) return null
+      // PNG snapshot with a sane size cap (base64 of a graph is tens of KB)
+      if (typeof rest.img !== 'string' || !rest.img.startsWith('data:image/png')) return null
+      if (rest.img.length > 3_500_000) return null
+      if (typeof rest.expr !== 'string' || rest.expr.length > 2000) return null
+      const v = rest.view as { cx?: unknown; cy?: unknown; scale?: unknown } | null | undefined
+      if (!v || !num(v.cx) || !num(v.cy) || !num(v.scale)) return null
+      break
+    }
     default:
       return null
   }

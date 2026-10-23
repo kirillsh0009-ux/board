@@ -26,7 +26,7 @@ export default function SelectionLayer() {
   const sh = Math.max((b.h + pad * 2) * camera.zoom, 24)
   if (sx + sw < 0 || sy + sh < 0 || sx > viewport.w || sy > viewport.h) return null
 
-  const canEdit = el.type === 'sticky' || el.type === 'text'
+  const canEdit = el.type === 'sticky' || el.type === 'text' || el.type === 'func'
 
   return (
     <div className="pointer-events-none absolute inset-0 z-20" aria-hidden={false}>
@@ -42,7 +42,7 @@ export default function SelectionLayer() {
         {canEdit && (
           <button
             type="button"
-            aria-label="Редактировать текст"
+            aria-label={el.type === 'func' ? 'Редактировать график' : 'Редактировать текст'}
             onClick={() => setEditing(el.id)}
             className="flex h-9 w-9 items-center justify-center rounded-lg text-zinc-600 hover:bg-zinc-100 active:bg-zinc-200"
           >

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { Plus, Minus, Maximize } from 'lucide-react'
 import { useBoardStore, net, remoteDrafts } from '@/lib/board/store'
 import { elementsBounds } from '@/lib/board/utils'
-import { renderToCanvas } from '@/lib/board/render'
+import { renderToCanvas, loadFuncImages } from '@/lib/board/render'
 import type { BoardElement, UserData } from '@/lib/board/types'
 import { RealtimeBus, type RTEvent } from '@/lib/board/realtime'
 import BoardCanvas from './BoardCanvas'
@@ -279,7 +279,7 @@ export default function BoardView({ boardId }: { boardId: string }) {
     }
   }
 
-  const onExport = () => {
+  const onExport = async () => {
     const els = Array.from(useBoardStore.getState().elements.values())
     if (els.length === 0) {
       toast({ title: 'Доска пуста', description: 'Добавьте что-нибудь перед экспортом' })
@@ -291,6 +291,8 @@ export default function BoardView({ boardId }: { boardId: string }) {
     const b = { x: bounds.x - pad, y: bounds.y - pad, w: bounds.w + pad * 2, h: bounds.h + pad * 2 }
     let scale = 2
     if (b.w * scale > 4096) scale = Math.max(0.5, 4096 / b.w)
+    // func stamps draw from <img> snapshots — make sure they are decoded first
+    await loadFuncImages(els)
     const canvas = document.createElement('canvas')
     renderToCanvas(canvas, els, b, scale)
     canvas.toBlob((blob) => {

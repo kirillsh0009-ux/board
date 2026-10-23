@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useBoardStore } from '@/lib/board/store'
-import type { BoardElement, StickyElement, TextElement } from '@/lib/board/types'
-import FuncEditor, { withExpr } from './FuncEditor'
+import type { BoardElement, FuncElement, StickyElement, TextElement } from '@/lib/board/types'
+import FuncEditor, { withExpr, type FuncStampApi } from './FuncEditor'
+import { uid } from '@/lib/board/utils'
 
 export default function ElementEditor() {
   const editingId = useBoardStore((s) => s.editingId)
@@ -14,8 +15,14 @@ export default function ElementEditor() {
   const initialRef = useRef<BoardElement | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const funcPanelRef = useRef<HTMLDivElement | null>(null)
+  const stampApiRef = useRef<FuncStampApi | null>(null)
   const lastEmit = useRef(0)
   const [funcOpen, setFuncOpen] = useState(false)
+  // mirror for commit() (stable callback must not read stale state)
+  const funcOpenRef = useRef(false)
+  useEffect(() => {
+    funcOpenRef.current = funcOpen
+  }, [funcOpen])
 
   const el = editingId ? elements.get(editingId) : null
   const isText = el?.type === 'text'
@@ -29,14 +36,79 @@ export default function ElementEditor() {
     setFuncOpen(hasFunc)
   }
 
+  /**
+   * Stamp the currently visible graph onto the board.
+   * existing === null -> create a new stamp (closing the [func] panel of a text
+   * element); otherwise update that func element in place (re-editing a stamp).
+   * No-op when the panel has no snapshot (already closed) or nothing is plotted.
+   */
+  const applyStamp = useCallback((existing: FuncElement | null) => {
+    const api = stampApiRef.current
+    if (!api) return
+    const data = api.getStamp()
+    if (!data || !data.img) return
+    const s = useBoardStore.getState()
+    const cam = s.camera
+    const vp = s.viewport
+    // the stamp keeps the popup's on-screen size: convert screen -> world
+    const wx = (data.sx - vp.w / 2) / cam.zoom + cam.x
+    const wy = (data.sy - vp.h / 2) / cam.zoom + cam.y
+    const w = data.w / cam.zoom
+    const h = data.h / cam.zoom
+    const view = { ...data.view }
+    if (existing) {
+      // keep the old stamp when nothing is plotted (empty/typo) — don't wipe it
+      if (!data.valid) return
+      const same =
+        existing.x === wx &&
+        existing.y === wy &&
+        existing.w === w &&
+        existing.h === h &&
+        existing.img === data.img &&
+        existing.expr === data.expr &&
+        existing.view.cx === view.cx &&
+        existing.view.cy === view.cy &&
+        existing.view.scale === view.scale
+      if (same) return
+      const updated: FuncElement = { ...existing, x: wx, y: wy, w, h, img: data.img, expr: data.expr, view }
+      s.updateLocal([updated])
+      s.broadcastUpdate([updated])
+      s.pushOp({ kind: 'update', before: existing, after: updated })
+      return
+    }
+    if (!data.valid) return // nothing plotted -> no stamp
+    const created: FuncElement = {
+      id: uid(),
+      type: 'func',
+      x: wx,
+      y: wy,
+      w,
+      h,
+      img: data.img,
+      expr: data.expr,
+      view,
+    }
+    s.addElements([created])
+  }, [])
+
   /** save & close; reads everything from the store so it never works on stale data */
   const commit = useCallback(() => {
     const s = useBoardStore.getState()
     const id = s.editingId
     if (!id) return // already committed (blur + outside tap can both fire)
-    const before = initialRef.current && initialRef.current.id === id ? initialRef.current : null
     const current = s.elements.get(id)
+    // editing a func stamp: any outside tap re-stamps it and closes
+    if (current?.type === 'func') {
+      applyStamp(current)
+      s.setEditing(null)
+      return
+    }
+    const before = initialRef.current && initialRef.current.id === id ? initialRef.current : null
     if (current && (current.type === 'sticky' || current.type === 'text')) {
+      // [func] panel is open -> the graph gets stamped onto the board before closing
+      if (current.type === 'text' && funcOpenRef.current) {
+        applyStamp(null)
+      }
       const text = current.text.trim()
       if (!text) {
         // empty -> remove element entirely
@@ -54,7 +126,7 @@ export default function ElementEditor() {
     }
     initialRef.current = null
     s.setEditing(null)
-  }, [])
+  }, [applyStamp])
 
   /** FuncEditor writes the expression back into the live store element */
   const onFuncWriteText = useCallback((expr: string) => {
@@ -70,10 +142,20 @@ export default function ElementEditor() {
     s.broadcastUpdate([updated])
   }, [])
 
+  /** close button / Escape inside the panel: stamp, then close (and keep text editing) */
   const onFuncClose = useCallback(() => {
+    const s = useBoardStore.getState()
+    const id = s.editingId
+    const cur = id ? s.elements.get(id) : null
+    if (cur?.type === 'func') {
+      applyStamp(cur)
+      s.setEditing(null)
+      return
+    }
+    applyStamp(null)
     setFuncOpen(false)
     taRef.current?.focus()
-  }, [])
+  }, [applyStamp])
 
   useEffect(() => {
     if (!el) {
@@ -110,7 +192,31 @@ export default function ElementEditor() {
     return () => document.removeEventListener('pointerdown', onDocPointerDown, true)
   }, [editingId, commit])
 
-  if (!editingId || !el || (el.type !== 'sticky' && el.type !== 'text')) return null
+  // ---- editing a func stamp: just the panel, no textarea --------------------
+  if (!editingId || !el) return null
+  if (el.type === 'func') {
+    const fel = el as FuncElement
+    const fsx = (fel.x - camera.x) * camera.zoom + viewport.w / 2
+    const fsy = (fel.y - camera.y) * camera.zoom + viewport.h / 2
+    return (
+      <div className="pointer-events-none absolute inset-0 z-40">
+        <FuncEditor
+          initial={{
+            expr: fel.expr,
+            view: { ...fel.view },
+            w: Math.max(260, Math.min(920, Math.round(fel.w * camera.zoom))),
+            h: Math.max(180, Math.min(640, Math.round(fel.h * camera.zoom))),
+          }}
+          anchor={{ sx: fsx, sy: fsy }}
+          viewport={viewport}
+          containerRef={funcPanelRef}
+          stampApiRef={stampApiRef}
+          onClose={onFuncClose}
+        />
+      </div>
+    )
+  }
+  if (el.type !== 'sticky' && el.type !== 'text') return null
 
   const sx = (el.x - camera.x) * camera.zoom + viewport.w / 2
   const sy = (el.y - camera.y) * camera.zoom + viewport.h / 2
@@ -162,8 +268,8 @@ export default function ElementEditor() {
           if (e.key === 'Escape') {
             e.preventDefault()
             if (funcOpen) {
-              setFuncOpen(false)
-              ;(e.target as HTMLTextAreaElement).focus()
+              // stamp the graph, close the panel, stay in the text editor
+              onFuncClose()
             } else {
               ;(e.target as HTMLTextAreaElement).blur()
             }
@@ -197,6 +303,7 @@ export default function ElementEditor() {
           anchor={{ sx, sy }}
           viewport={viewport}
           containerRef={funcPanelRef}
+          stampApiRef={stampApiRef}
           onClose={onFuncClose}
           onWriteText={onFuncWriteText}
         />

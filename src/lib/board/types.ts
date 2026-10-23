@@ -9,7 +9,7 @@ export type Tool =
   | 'ellipse'
   | 'arrow'
 
-export type ElementType = 'path' | 'rect' | 'ellipse' | 'arrow' | 'sticky' | 'text'
+export type ElementType = 'path' | 'rect' | 'ellipse' | 'arrow' | 'sticky' | 'text' | 'func'
 
 export interface UserData {
   id: string
@@ -65,7 +65,27 @@ export interface TextElement {
   text: string
 }
 
-export type BoardElement = PathElement | ShapeElement | StickyElement | TextElement
+/**
+ * Stamped function graph: a PNG snapshot of the [func] editor canvas exactly as
+ * it was visible at close time, plus the expression + graph view so the stamp
+ * can be re-opened for editing later.
+ */
+export interface FuncElement {
+  id: string
+  type: 'func'
+  x: number
+  y: number
+  w: number
+  h: number
+  /** PNG dataURL (rounded corners + frame baked in, transparent outside) */
+  img: string
+  /** expression(s), split on ';' — kept for re-editing */
+  expr: string
+  /** graph viewport at stamp time: math coords of the center + px per unit */
+  view: { cx: number; cy: number; scale: number }
+}
+
+export type BoardElement = PathElement | ShapeElement | StickyElement | TextElement | FuncElement
 
 export interface Rect {
   x: number
