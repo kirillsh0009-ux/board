@@ -218,7 +218,8 @@ export function hitElement(el: BoardElement, wx: number, wy: number, tol: number
       const r = expandRect(textBounds(el), tol)
       return wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h
     }
-    case 'func': {
+    case 'func':
+    case 'image': {
       const r = expandRect({ x: el.x, y: el.y, w: el.w, h: el.h }, tol)
       return wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h
     }

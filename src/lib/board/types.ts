@@ -9,7 +9,7 @@ export type Tool =
   | 'ellipse'
   | 'arrow'
 
-export type ElementType = 'path' | 'rect' | 'ellipse' | 'arrow' | 'sticky' | 'text' | 'func'
+export type ElementType = 'path' | 'rect' | 'ellipse' | 'arrow' | 'sticky' | 'text' | 'func' | 'image'
 
 export interface UserData {
   id: string
@@ -90,7 +90,22 @@ export interface FuncElement {
   srcId?: string
 }
 
-export type BoardElement = PathElement | ShapeElement | StickyElement | TextElement | FuncElement
+export type BoardElement = PathElement | ShapeElement | StickyElement | TextElement | FuncElement | ImageElement
+
+/**
+ * Uploaded photo / pasted image. `img` is a dataURL (downscaled + re-encoded
+ * on import so it stays well under the realtime broadcast payload limit).
+ */
+export interface ImageElement {
+  id: string
+  type: 'image'
+  x: number
+  y: number
+  w: number
+  h: number
+  /** data:image/png|jpeg dataURL */
+  img: string
+}
 
 export interface Rect {
   x: number

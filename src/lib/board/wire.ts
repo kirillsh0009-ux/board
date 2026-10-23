@@ -54,6 +54,17 @@ export function fromWire(raw: WireElement | Partial<BoardElement>): BoardElement
       if (rest.srcId !== undefined && (typeof rest.srcId !== 'string' || rest.srcId.length > 64)) return null
       break
     }
+    case 'image': {
+      if (!(num(rest.x) && num(rest.y) && num(rest.w) && num(rest.h))) return null
+      // photo dataURL with a sane size cap (import pipeline downscales anyway)
+      if (
+        typeof rest.img !== 'string' ||
+        !(rest.img.startsWith('data:image/png') || rest.img.startsWith('data:image/jpeg'))
+      )
+        return null
+      if (rest.img.length > 3_500_000) return null
+      break
+    }
     default:
       return null
   }

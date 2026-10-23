@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef } from 'react'
 import { Plus, Minus, Maximize } from 'lucide-react'
 import { useBoardStore, net, remoteDrafts } from '@/lib/board/store'
 import { elementsBounds } from '@/lib/board/utils'
-import { renderToCanvas, loadFuncImages } from '@/lib/board/render'
+import { renderToCanvas, loadRasterImages } from '@/lib/board/render'
+import { processImageFile, placeImagesOnBoard, type ProcessedImage } from '@/lib/board/images'
 import type { BoardElement, UserData } from '@/lib/board/types'
 import { RealtimeBus, type RTEvent } from '@/lib/board/realtime'
 import BoardCanvas from './BoardCanvas'
@@ -214,6 +215,40 @@ export default function BoardView({ boardId }: { boardId: string }) {
     return () => clearInterval(t)
   }, [])
 
+  // paste images from the clipboard (Ctrl+V / «Вставить»)
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const s = useBoardStore.getState()
+      if (s.editingId) return // text/sticky editor handles its own paste
+      const items = e.clipboardData?.items
+      if (!items) return
+      const files: File[] = []
+      for (const item of Array.from(items)) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const f = item.getAsFile()
+          if (f) files.push(f)
+        }
+      }
+      if (files.length === 0) return
+      e.preventDefault()
+      void (async () => {
+        const processed: ProcessedImage[] = []
+        for (const f of files.slice(0, 10)) {
+          const im = await processImageFile(f)
+          if (im) processed.push(im)
+        }
+        const placed = placeImagesOnBoard(processed)
+        if (placed.length > 0) {
+          toast({ title: placed.length === 1 ? 'Фото вставлено' : `Вставлено фото: ${placed.length}` })
+        } else {
+          toast({ title: 'Не удалось вставить изображение', description: 'Попробуйте картинку поменьше' })
+        }
+      })()
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [toast])
+
   // keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -225,9 +260,9 @@ export default function BoardView({ boardId }: { boardId: string }) {
         if (e.shiftKey) s.redo()
         else s.undo()
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (s.selectedId) {
+        if (s.selectedIds.length > 0) {
           e.preventDefault()
-          s.deleteElements([s.selectedId])
+          s.deleteElements(s.selectedIds)
           s.select(null)
         }
       } else if (e.key === 'Escape') {
@@ -291,8 +326,8 @@ export default function BoardView({ boardId }: { boardId: string }) {
     const b = { x: bounds.x - pad, y: bounds.y - pad, w: bounds.w + pad * 2, h: bounds.h + pad * 2 }
     let scale = 2
     if (b.w * scale > 4096) scale = Math.max(0.5, 4096 / b.w)
-    // func stamps draw from <img> snapshots — make sure they are decoded first
-    await loadFuncImages(els)
+    // func stamps + photos draw from decoded <img> snapshots — preload first
+    await loadRasterImages(els)
     const canvas = document.createElement('canvas')
     renderToCanvas(canvas, els, b, scale)
     canvas.toBlob((blob) => {

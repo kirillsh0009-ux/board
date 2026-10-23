@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   MousePointer2,
   Pencil,
@@ -11,12 +11,16 @@ import {
   Square,
   Circle,
   ArrowUpRight,
+  Image as ImageIcon,
+  Loader2,
   Undo2,
   Redo2,
 } from 'lucide-react'
 import { useBoardStore } from '@/lib/board/store'
 import { PEN_COLORS, STICKY_COLORS, STROKE_WIDTHS } from '@/lib/board/utils'
+import { processImageFile, placeImagesOnBoard } from '@/lib/board/images'
 import type { Tool } from '@/lib/board/types'
+import { useToast } from '@/hooks/use-toast'
 import {
   Popover,
   PopoverContent,
@@ -49,6 +53,32 @@ export default function Toolbar() {
   const redo = useBoardStore((s) => s.redo)
   const undoCount = useBoardStore((s) => s.undoStack.length)
   const redoCount = useBoardStore((s) => s.redoStack.length)
+  const { toast } = useToast()
+
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [imgBusy, setImgBusy] = useState(false)
+
+  const onFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+    e.target.value = ''
+    if (files.length === 0 || imgBusy) return
+    setImgBusy(true)
+    try {
+      const processed = []
+      for (const f of files.slice(0, 10)) {
+        const im = await processImageFile(f)
+        if (im) processed.push(im)
+      }
+      const placed = placeImagesOnBoard(processed)
+      if (placed.length > 0) {
+        toast({ title: placed.length === 1 ? 'Фото добавлено' : `Добавлено фото: ${placed.length}` })
+      } else {
+        toast({ title: 'Не удалось добавить фото', description: 'Попробуйте изображение поменьше' })
+      }
+    } finally {
+      setImgBusy(false)
+    }
+  }
 
   const [colorOpen, setColorOpen] = useState(false)
   const [widthOpen, setWidthOpen] = useState(false)
@@ -68,6 +98,34 @@ export default function Toolbar() {
         role="toolbar"
         aria-label="Инструменты доски"
       >
+        {/* photo upload — first button on the left */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="Загрузить фото"
+              data-testid="toolbar-photo"
+              disabled={imgBusy}
+              onClick={() => fileRef.current?.click()}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-zinc-600 transition-colors hover:bg-zinc-100 active:bg-zinc-200 disabled:opacity-50"
+            >
+              {imgBusy ? <Loader2 className="h-[18px] w-[18px] animate-spin" /> : <ImageIcon className="h-[18px] w-[18px]" />}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">Загрузить фото</TooltipContent>
+        </Tooltip>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={onFiles}
+          data-testid="photo-input"
+          aria-hidden
+          tabIndex={-1}
+        />
+        <div className="mx-0.5 h-6 w-px shrink-0 bg-zinc-200" aria-hidden />
         {TOOLS.map(({ tool: t, icon: Icon, label, key }) => (
           <Tooltip key={t}>
             <TooltipTrigger asChild>

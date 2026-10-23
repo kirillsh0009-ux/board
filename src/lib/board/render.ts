@@ -1,4 +1,4 @@
-import type { BoardElement, Camera, DraftStroke, FuncElement, LocalDraft, ShapeElement } from './types'
+import type { BoardElement, Camera, DraftStroke, FuncElement, ImageElement, LocalDraft, ShapeElement } from './types'
 import { TEXT_FONT, TEXT_MAX_WIDTH, STICKY_FONT, wrapLines } from './utils'
 
 function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
@@ -141,55 +141,35 @@ function drawText(ctx: CanvasRenderingContext2D, el: { x: number; y: number; siz
   }
 }
 
-/** decoded PNG cache for func stamps (keyed by element id, re-created when img changes) */
-const funcImages = new Map<string, { src: string; img: HTMLImageElement }>()
+/** decoded image cache for func stamps + photo elements (keyed by element id, re-created when img changes) */
+const rasterImages = new Map<string, { src: string; img: HTMLImageElement }>()
 
-function getFuncImage(id: string, src: string): HTMLImageElement | null {
-  const hit = funcImages.get(id)
+function getRasterImage(id: string, src: string): HTMLImageElement | null {
+  const hit = rasterImages.get(id)
   if (hit && hit.src === src) return hit.img.complete && hit.img.naturalWidth > 0 ? hit.img : null
   if (typeof Image === 'undefined') return null
   const img = new Image()
   img.src = src
-  funcImages.set(id, { src, img })
-  if (funcImages.size > 120) {
-    const first = funcImages.keys().next()
-    if (!first.done) funcImages.delete(first.value)
+  rasterImages.set(id, { src, img })
+  if (rasterImages.size > 160) {
+    const first = rasterImages.keys().next()
+    if (!first.done) rasterImages.delete(first.value)
   }
-  return null // drawn white for this frame; the image appears on the next one
+  return null // drawn as placeholder for this frame; the image appears on the next one
 }
 
-function drawFunc(ctx: CanvasRenderingContext2D, el: FuncElement) {
-  // white card behind the (transparent-cornered) snapshot + soft shadow
-  ctx.save()
-  ctx.shadowColor = 'rgba(0,0,0,0.15)'
-  ctx.shadowBlur = 6
-  ctx.shadowOffsetY = 2
-  ctx.fillStyle = '#ffffff'
-  roundRectPath(ctx, el.x, el.y, el.w, el.h, 6)
-  ctx.fill()
-  ctx.restore()
-
-  const img = getFuncImage(el.id, el.img)
-  if (img) {
-    ctx.save()
-    roundRectPath(ctx, el.x, el.y, el.w, el.h, 6)
-    ctx.clip()
-    ctx.drawImage(img, el.x, el.y, el.w, el.h)
-    ctx.restore()
-  }
-}
-
-/** preload all func stamp images before PNG export (so renderToCanvas sees them) */
-export function loadFuncImages(elements: BoardElement[]): Promise<void> {
+/** preload all func stamp + photo images before PNG export (so renderToCanvas sees them) */
+export function loadRasterImages(elements: BoardElement[]): Promise<void> {
   if (typeof Image === 'undefined') return Promise.resolve()
   const imgs: HTMLImageElement[] = []
   for (const el of elements) {
-    if (el.type !== 'func') continue
-    const hit = funcImages.get(el.id)
-    if (hit && hit.src === el.img) continue
+    if (el.type !== 'func' && el.type !== 'image') continue
+    const src = el.img
+    const hit = rasterImages.get(el.id)
+    if (hit && hit.src === src) continue
     const img = new Image()
-    img.src = el.img
-    funcImages.set(el.id, { src: el.img, img })
+    img.src = src
+    rasterImages.set(el.id, { src, img })
     imgs.push(img)
   }
   if (imgs.length === 0) return Promise.resolve()
@@ -203,6 +183,55 @@ export function loadFuncImages(elements: BoardElement[]): Promise<void> {
         })
     )
   ).then(() => undefined)
+}
+
+function drawFunc(ctx: CanvasRenderingContext2D, el: FuncElement) {
+  // white card behind the (transparent-cornered) snapshot + soft shadow
+  ctx.save()
+  ctx.shadowColor = 'rgba(0,0,0,0.15)'
+  ctx.shadowBlur = 6
+  ctx.shadowOffsetY = 2
+  ctx.fillStyle = '#ffffff'
+  roundRectPath(ctx, el.x, el.y, el.w, el.h, 6)
+  ctx.fill()
+  ctx.restore()
+
+  const img = getRasterImage(el.id, el.img)
+  if (img) {
+    ctx.save()
+    roundRectPath(ctx, el.x, el.y, el.w, el.h, 6)
+    ctx.clip()
+    ctx.drawImage(img, el.x, el.y, el.w, el.h)
+    ctx.restore()
+  }
+}
+
+function drawImageEl(ctx: CanvasRenderingContext2D, el: ImageElement) {
+  const img = getRasterImage(el.id, el.img)
+  if (!img) {
+    // placeholder while the dataURL decodes (one frame)
+    ctx.save()
+    ctx.fillStyle = '#f4f4f5'
+    roundRectPath(ctx, el.x, el.y, el.w, el.h, 6)
+    ctx.fill()
+    ctx.restore()
+    return
+  }
+  // soft shadow from an invisible rounded card
+  ctx.save()
+  ctx.shadowColor = 'rgba(0,0,0,0.15)'
+  ctx.shadowBlur = 6
+  ctx.shadowOffsetY = 2
+  ctx.fillStyle = '#ffffff'
+  roundRectPath(ctx, el.x, el.y, el.w, el.h, 6)
+  ctx.fill()
+  ctx.restore()
+
+  ctx.save()
+  roundRectPath(ctx, el.x, el.y, el.w, el.h, 6)
+  ctx.clip()
+  ctx.drawImage(img, el.x, el.y, el.w, el.h)
+  ctx.restore()
 }
 
 export function drawElement(ctx: CanvasRenderingContext2D, el: BoardElement | { id?: string; type: 'path'; points: number[]; color: string; width: number; marker: boolean } | { type: 'rect' | 'ellipse' | 'arrow'; x: number; y: number; w: number; h: number; color: string; strokeWidth: number }) {
@@ -223,6 +252,9 @@ export function drawElement(ctx: CanvasRenderingContext2D, el: BoardElement | { 
       break
     case 'func':
       drawFunc(ctx, el as FuncElement)
+      break
+    case 'image':
+      drawImageEl(ctx, el as ImageElement)
       break
   }
 }

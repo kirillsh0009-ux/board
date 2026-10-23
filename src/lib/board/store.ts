@@ -13,6 +13,7 @@ export type Op =
   | { kind: 'add'; elements: BoardElement[] }
   | { kind: 'delete'; elements: BoardElement[] }
   | { kind: 'update'; before: BoardElement; after: BoardElement }
+  | { kind: 'batch-update'; pairs: Array<{ before: BoardElement; after: BoardElement }> }
   | { kind: 'clear'; elements: BoardElement[] }
 
 export interface CursorInfo {
@@ -116,7 +117,10 @@ interface BoardStore {
   color: string
   stickyColor: string
   width: number
-  selectedId: string | null
+  /** multi-selection (empty = nothing selected) */
+  selectedIds: string[]
+  /** rubber-band selection rect in screen coords while dragging (transient) */
+  marquee: { x0: number; y0: number; x1: number; y1: number } | null
   editingId: string | null
   users: UserData[]
   me: UserData
@@ -138,6 +142,9 @@ interface BoardStore {
   setStickyColor: (color: string) => void
   setWidth: (width: number) => void
   select: (id: string | null) => void
+  /** replace the whole multi-selection */
+  selectMany: (ids: string[]) => void
+  setMarquee: (m: { x0: number; y0: number; x1: number; y1: number } | null) => void
   setEditing: (id: string | null) => void
 
   /** local create */
@@ -201,7 +208,8 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   color: '#1e293b',
   stickyColor: '#fff176',
   width: 4,
-  selectedId: null,
+  selectedIds: [],
+  marquee: null,
   editingId: null,
   users: [],
   me: { id: '', name: '', color: '#1e293b' },
@@ -224,11 +232,13 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     }),
   setViewport: (w, h) => set({ viewport: { w, h } }),
   setCamera: (camera) => set({ camera }),
-  setTool: (tool) => set({ tool, selectedId: tool === 'select' ? get().selectedId : null }),
+  setTool: (tool) => set({ tool, selectedIds: tool === 'select' ? get().selectedIds : [] }),
   setColor: (color) => set({ color }),
   setStickyColor: (stickyColor) => set({ stickyColor }),
   setWidth: (width) => set({ width }),
-  select: (selectedId) => set({ selectedId }),
+  select: (id) => set({ selectedIds: id ? [id] : [] }),
+  selectMany: (ids) => set({ selectedIds: ids }),
+  setMarquee: (marquee) => set({ marquee }),
   setEditing: (editingId) => set({ editingId }),
 
   addElements: (els, opts) => {
@@ -263,7 +273,11 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
       }
     }
     if (removed.length === 0) return
-    set({ elements: map, selectedId: s.selectedId && ids.includes(s.selectedId) ? null : s.selectedId, editingId: s.editingId && ids.includes(s.editingId) ? null : s.editingId })
+    set({
+      elements: map,
+      selectedIds: s.selectedIds.filter((id) => !ids.includes(id)),
+      editingId: s.editingId && ids.includes(s.editingId) ? null : s.editingId,
+    })
     persistDelete(ids)
     if (opts?.record !== false) get().pushOp({ kind: 'delete', elements: removed })
   },
@@ -272,7 +286,7 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     const s = get()
     const elements = Array.from(s.elements.values())
     if (elements.length === 0) return
-    set({ elements: new Map(), selectedId: null, editingId: null })
+    set({ elements: new Map(), selectedIds: [], marquee: null, editingId: null })
     broadcast({ event: 'elements:clear' })
     void persistClear()
     get().pushOp({ kind: 'clear', elements })
@@ -306,6 +320,11 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         set({ elements: map })
         persistUpdate([op.before])
         break
+      case 'batch-update':
+        for (const pr of op.pairs) map.set(pr.before.id, pr.before)
+        set({ elements: map })
+        persistUpdate(op.pairs.map((pr) => pr.before))
+        break
       case 'clear':
         for (const el of op.elements) map.set(el.id, el)
         set({ elements: map })
@@ -336,8 +355,13 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         set({ elements: map })
         persistUpdate([op.after])
         break
+      case 'batch-update':
+        for (const pr of op.pairs) map.set(pr.after.id, pr.after)
+        set({ elements: map })
+        persistUpdate(op.pairs.map((pr) => pr.after))
+        break
       case 'clear':
-        set({ elements: new Map(), selectedId: null })
+        set({ elements: new Map(), selectedIds: [] })
         broadcast({ event: 'elements:clear' })
         void persistClear()
         break
@@ -367,19 +391,18 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   remoteDelete: (ids) => {
     set((s) => {
       const map = new Map(s.elements)
-      let selectedId = s.selectedId
+      const selectedIds = s.selectedIds.filter((id) => !ids.includes(id))
       let editingId = s.editingId
       for (const id of ids) {
         map.delete(id)
-        if (selectedId === id) selectedId = null
         if (editingId === id) editingId = null
       }
-      return { elements: map, selectedId, editingId }
+      return { elements: map, selectedIds, editingId }
     })
     for (const id of ids) remoteDrafts.delete(id)
   },
 
-  remoteClear: () => set({ elements: new Map(), selectedId: null, editingId: null }),
+  remoteClear: () => set({ elements: new Map(), selectedIds: [], marquee: null, editingId: null }),
 
   setCursor: (userId, x, y) => {
     set((s) => {

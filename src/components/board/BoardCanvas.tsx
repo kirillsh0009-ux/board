@@ -3,11 +3,11 @@
 import { useEffect, useRef } from 'react'
 import { useBoardStore, remoteDrafts, net } from '@/lib/board/store'
 import { renderBoard } from '@/lib/board/render'
-import { hitElement, moveElement, uid, normRect } from '@/lib/board/utils'
+import { elementBounds, hitElement, moveElement, uid, normRect } from '@/lib/board/utils'
 import { toWire } from '@/lib/board/wire'
 import type { BoardElement, Camera, LocalDraft } from '@/lib/board/types'
 
-type Mode = 'none' | 'active' | 'draw' | 'shape' | 'erase' | 'move' | 'pan' | 'pinch'
+type Mode = 'none' | 'active' | 'draw' | 'shape' | 'erase' | 'move' | 'pan' | 'pinch' | 'marquee'
 
 interface PointerInfo {
   id: number
@@ -38,7 +38,7 @@ export default function BoardCanvas() {
 
   const panStart = useRef({ camX: 0, camY: 0, sx: 0, sy: 0 })
   const pinch = useRef({ dist: 0, zoom0: 1, worldX: 0, worldY: 0 })
-  const moveCtx = useRef<{ id: string; before: BoardElement; lastX: number; lastY: number; moved: boolean } | null>(null)
+  const moveCtx = useRef<{ ids: string[]; before: BoardElement[]; lastX: number; lastY: number; moved: boolean } | null>(null)
   const lastTap = useRef({ time: 0, x: 0, y: 0, id: '' })
 
   const lastCursorEmit = useRef(0)
@@ -179,6 +179,23 @@ export default function BoardCanvas() {
     localDraft.current = { kind: 'erase', x: wx, y: wy, r }
   }
 
+  /** finish a multi-move: broadcast final positions + one undo op for the whole drag */
+  function commitMove() {
+    const m = moveCtx.current
+    if (!m || !m.moved) return
+    const st = useBoardStore.getState()
+    const pairs: Array<{ before: BoardElement; after: BoardElement }> = []
+    for (let i = 0; i < m.ids.length; i++) {
+      const el = st.elements.get(m.ids[i])
+      const b = m.before[i]
+      if (el && b) pairs.push({ before: b, after: el })
+    }
+    if (pairs.length === 0) return
+    st.broadcastUpdate(pairs.map((pr) => pr.after))
+    if (pairs.length === 1) st.pushOp({ kind: 'update', before: pairs[0].before, after: pairs[0].after })
+    else st.pushOp({ kind: 'batch-update', pairs })
+  }
+
   // ---------- pointer handlers ----------
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
@@ -211,12 +228,7 @@ export default function BoardCanvas() {
         if (removed.length > 0) s.pushOp({ kind: 'delete', elements: removed })
         localDraft.current = null
       } else if (mode.current === 'move' && moveCtx.current) {
-        const m = moveCtx.current
-        const el = s.elements.get(m.id)
-        if (el && m.moved) {
-          s.broadcastUpdate([el])
-          s.pushOp({ kind: 'update', before: m.before, after: el })
-        }
+        commitMove()
         moveCtx.current = null
       }
       mode.current = 'pinch'
@@ -242,28 +254,65 @@ export default function BoardCanvas() {
     mode.current = 'active'
     activePointer.current = e.pointerId
 
+    // right/middle mouse button -> pan the board from any tool (keeps selection)
+    if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) {
+      mode.current = 'pan'
+      panStart.current = { camX: s.camera.x, camY: s.camera.y, sx: p.sx, sy: p.sy }
+      return
+    }
+
     const tool = s.tool
 
     if (tool === 'select') {
       const hit = hitTopmost(p.x, p.y)
       if (hit) {
-        // tap on already-selected sticky/text -> edit
+        // tap on already-selected sticky/text -> edit (only when it is the sole selection)
         const now = Date.now()
         const isDoubleTap =
           now - lastTap.current.time < 350 &&
           Math.hypot(p.sx - lastTap.current.x, p.sy - lastTap.current.y) < 24 &&
           lastTap.current.id === hit.id
         lastTap.current = { time: now, x: p.sx, y: p.sy, id: hit.id }
-        if ((hit.type === 'sticky' || hit.type === 'text' || hit.type === 'func') && (isDoubleTap || s.selectedId === hit.id)) {
+        if (
+          (hit.type === 'sticky' || hit.type === 'text' || hit.type === 'func') &&
+          (isDoubleTap || (s.selectedIds.length === 1 && s.selectedIds[0] === hit.id))
+        ) {
           s.select(hit.id)
           s.setEditing(hit.id)
           mode.current = 'none'
           activePointer.current = null
           return
         }
-        s.select(hit.id)
-        moveCtx.current = { id: hit.id, before: hit, lastX: p.x, lastY: p.y, moved: false }
+        if (e.shiftKey && e.pointerType === 'mouse') {
+          // shift-click toggles membership in the multi-selection
+          const next = s.selectedIds.includes(hit.id)
+            ? s.selectedIds.filter((x) => x !== hit.id)
+            : [...s.selectedIds, hit.id]
+          s.selectMany(next)
+          if (next.length === 0) {
+            mode.current = 'none'
+            activePointer.current = null
+            return
+          }
+        } else if (!s.selectedIds.includes(hit.id)) {
+          s.select(hit.id)
+        }
+        // drag moves everything currently selected
+        const st = useBoardStore.getState()
+        const ids = st.selectedIds.filter((id) => st.elements.has(id))
+        moveCtx.current = {
+          ids,
+          before: ids.map((id) => st.elements.get(id) as BoardElement),
+          lastX: p.x,
+          lastY: p.y,
+          moved: false,
+        }
         mode.current = 'move'
+      } else if (e.pointerType === 'mouse') {
+        // left drag on empty space -> rubber-band multi-select
+        s.select(null)
+        s.setMarquee({ x0: p.sx, y0: p.sy, x1: p.sx, y1: p.sy })
+        mode.current = 'marquee'
       } else {
         s.select(null)
         mode.current = 'pan'
@@ -424,21 +473,30 @@ export default function BoardCanvas() {
       return
     }
 
+    if (mode.current === 'marquee') {
+      const m = s.marquee
+      if (m) s.setMarquee({ ...m, x1: p.sx, y1: p.sy })
+      return
+    }
+
     if (mode.current === 'move' && moveCtx.current) {
       const m = moveCtx.current
-      const el = s.elements.get(m.id)
-      if (el) {
-        const dx = p.x - m.lastX
-        const dy = p.y - m.lastY
-        if (dx !== 0 || dy !== 0) {
+      const dx = p.x - m.lastX
+      const dy = p.y - m.lastY
+      if (dx !== 0 || dy !== 0) {
+        const moved: BoardElement[] = []
+        for (const id of m.ids) {
+          const el = s.elements.get(id)
+          if (el) moved.push(moveElement(el, dx, dy))
+        }
+        if (moved.length > 0) {
           m.moved = true
-          const moved = moveElement(el, dx, dy)
-          s.updateLocal([moved])
+          s.updateLocal(moved)
           m.lastX = p.x
           m.lastY = p.y
           if (now - lastUpdateEmit.current > 60 && net.bus?.enabled) {
             lastUpdateEmit.current = now
-            net.bus.send({ event: 'element:update', element: toWire(moved) })
+            for (const el of moved) net.bus.send({ event: 'element:update', element: toWire(el) })
           }
         }
       }
@@ -577,13 +635,30 @@ export default function BoardCanvas() {
       }
       localDraft.current = null
     } else if (mode.current === 'move' && moveCtx.current) {
-      const m = moveCtx.current
-      const el = s.elements.get(m.id)
-      if (el && m.moved) {
-        s.broadcastUpdate([el])
-        s.pushOp({ kind: 'update', before: m.before, after: el })
-      }
+      commitMove()
       moveCtx.current = null
+    } else if (mode.current === 'marquee') {
+      const m = s.marquee
+      s.setMarquee(null)
+      if (m) {
+        const x0 = Math.min(m.x0, m.x1)
+        const x1 = Math.max(m.x0, m.x1)
+        const y0 = Math.min(m.y0, m.y1)
+        const y1 = Math.max(m.y0, m.y1)
+        // a near-zero drag was just a click on empty space -> selection stays cleared
+        if (x1 - x0 > 6 || y1 - y0 > 6) {
+          const wx0 = (x0 - s.viewport.w / 2) / s.camera.zoom + s.camera.x
+          const wx1 = (x1 - s.viewport.w / 2) / s.camera.zoom + s.camera.x
+          const wy0 = (y0 - s.viewport.h / 2) / s.camera.zoom + s.camera.y
+          const wy1 = (y1 - s.viewport.h / 2) / s.camera.zoom + s.camera.y
+          const ids: string[] = []
+          for (const el of s.elements.values()) {
+            const b = elementBounds(el)
+            if (b.x < wx1 && b.x + b.w > wx0 && b.y < wy1 && b.y + b.h > wy0) ids.push(el.id)
+          }
+          if (ids.length > 0) s.selectMany(ids)
+        }
+      }
     } else if (mode.current === 'pan') {
       // nothing
     }
