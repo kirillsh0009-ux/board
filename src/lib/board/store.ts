@@ -1,10 +1,10 @@
 import { create } from 'zustand'
-import type { Socket } from 'socket.io-client'
 import type { BoardElement, Camera, ConnectionStatus, Tool, UserData } from './types'
-import { toWire } from './wire'
+import { toWire, type WireElement } from './wire'
+import type { RealtimeBus, RTEvent } from './realtime'
 
-/** network bridge — BoardView assigns socket + boardId */
-export const net: { socket: Socket | null; boardId: string | null } = { socket: null, boardId: null }
+/** network bridge — BoardView assigns the realtime bus + boardId */
+export const net: { bus: RealtimeBus | null; boardId: string | null } = { bus: null, boardId: null }
 
 /** remote in-progress strokes (userId+strokeId -> stroke), rendered every frame */
 export const remoteDrafts = new Map<string, { points: number[]; color: string; width: number; marker: boolean; ts: number }>()
@@ -23,9 +23,87 @@ export interface CursorInfo {
   ts: number
 }
 
-function emit(event: string, payload: Record<string, unknown>) {
-  const s = net.socket
-  if (s && net.boardId && s.connected) s.emit(event, { boardId: net.boardId, ...payload })
+function broadcast(ev: RTEvent) {
+  const bus = net.bus
+  if (bus && net.boardId) bus.send(ev)
+}
+
+/**
+ * Client-side persistence queue: batches element ops and flushes them to the
+ * REST batch endpoint (debounced). Survives failures with a retry timer.
+ */
+const persist = {
+  upserts: new Map<string, WireElement>(),
+  deletes: new Set<string>(),
+  timer: null as ReturnType<typeof setTimeout> | null,
+  flushing: false,
+}
+
+const FLUSH_DELAY = 700
+const RETRY_DELAY = 2000
+const UPSERT_CHUNK = 200
+
+function scheduleFlush() {
+  if (persist.timer) return
+  persist.timer = setTimeout(flushPersist, FLUSH_DELAY)
+}
+
+async function flushPersist() {
+  persist.timer = null
+  if (persist.flushing) return
+  const boardId = net.boardId
+  if (!boardId) return
+
+  persist.flushing = true
+  try {
+    while (persist.deletes.size > 0 || persist.upserts.size > 0) {
+      const deletes = Array.from(persist.deletes).slice(0, UPSERT_CHUNK)
+      for (const id of deletes) persist.deletes.delete(id)
+      const upserts: WireElement[] = []
+      for (const [id, el] of persist.upserts) {
+        if (upserts.length >= UPSERT_CHUNK) break
+        upserts.push(el)
+        persist.upserts.delete(id)
+      }
+      if (deletes.length === 0 && upserts.length === 0) break
+
+      const res = await fetch(`/api/boards/${boardId}/elements/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ upserts, deletes }),
+      })
+      if (!res.ok) throw new Error(`batch ${res.status}`)
+    }
+  } catch {
+    // retry whatever is left in the queues after a delay
+    persist.timer = setTimeout(flushPersist, RETRY_DELAY)
+  } finally {
+    persist.flushing = false
+  }
+}
+
+function clearPersistState() {
+  if (persist.timer) {
+    clearTimeout(persist.timer)
+    persist.timer = null
+  }
+  persist.upserts.clear()
+  persist.deletes.clear()
+}
+
+async function persistClear() {
+  const boardId = net.boardId
+  if (!boardId) return
+  clearPersistState()
+  try {
+    const res = await fetch(`/api/boards/${boardId}/clear`, { method: 'POST' })
+    if (!res.ok) throw new Error(`clear ${res.status}`)
+  } catch {
+    // retry once after a delay
+    setTimeout(() => {
+      void fetch(`/api/boards/${boardId}/clear`, { method: 'POST' }).catch(() => {})
+    }, RETRY_DELAY)
+  }
 }
 
 interface BoardStore {
@@ -89,13 +167,28 @@ interface BoardStore {
 const MAX_OPS = 120
 
 function persistAdd(els: BoardElement[]) {
-  for (const el of els) emit('element:add', { element: toWire(el) })
+  for (const el of els) {
+    broadcast({ event: 'element:add', element: toWire(el) })
+    persist.deletes.delete(el.id)
+    persist.upserts.set(el.id, toWire(el))
+  }
+  scheduleFlush()
 }
 function persistUpdate(els: BoardElement[]) {
-  for (const el of els) emit('element:update', { element: toWire(el) })
+  for (const el of els) {
+    broadcast({ event: 'element:update', element: toWire(el) })
+    persist.upserts.set(el.id, toWire(el))
+  }
+  scheduleFlush()
 }
 function persistDelete(ids: string[]) {
-  if (ids.length > 0) emit('element:delete', { ids })
+  if (ids.length === 0) return
+  broadcast({ event: 'element:delete', ids })
+  for (const id of ids) {
+    persist.upserts.delete(id)
+    persist.deletes.add(id)
+  }
+  scheduleFlush()
 }
 
 export const useBoardStore = create<BoardStore>((set, get) => ({
@@ -180,7 +273,8 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
     const elements = Array.from(s.elements.values())
     if (elements.length === 0) return
     set({ elements: new Map(), selectedId: null, editingId: null })
-    emit('elements:clear', {})
+    broadcast({ event: 'elements:clear' })
+    void persistClear()
     get().pushOp({ kind: 'clear', elements })
   },
 
@@ -244,7 +338,8 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
         break
       case 'clear':
         set({ elements: new Map(), selectedId: null })
-        emit('elements:clear', {})
+        broadcast({ event: 'elements:clear' })
+        void persistClear()
         break
     }
   },

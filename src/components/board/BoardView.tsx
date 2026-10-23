@@ -1,12 +1,12 @@
 'use client'
 
 import { useCallback, useEffect, useRef } from 'react'
-import { io, type Socket } from 'socket.io-client'
 import { Plus, Minus, Maximize } from 'lucide-react'
 import { useBoardStore, net, remoteDrafts } from '@/lib/board/store'
 import { elementsBounds } from '@/lib/board/utils'
 import { renderToCanvas } from '@/lib/board/render'
 import type { BoardElement, UserData } from '@/lib/board/types'
+import { RealtimeBus, type RTEvent } from '@/lib/board/realtime'
 import BoardCanvas from './BoardCanvas'
 import TopBar from './TopBar'
 import Toolbar from './Toolbar'
@@ -16,6 +16,34 @@ import ElementEditor from './ElementEditor'
 import { useToast } from '@/hooks/use-toast'
 import { upsertRecent, randomGuest } from '@/lib/board/utils'
 import { fromWire } from '@/lib/board/wire'
+
+function handleRemoteEvent(ev: RTEvent) {
+  switch (ev.event) {
+    case 'element:add': {
+      const el = fromWire(ev.element)
+      if (el) useBoardStore.getState().remoteAdd(el)
+      break
+    }
+    case 'element:update': {
+      const el = fromWire(ev.element)
+      if (el) useBoardStore.getState().remoteUpdate(el)
+      break
+    }
+    case 'element:delete':
+      useBoardStore.getState().remoteDelete(ev.ids)
+      break
+    case 'elements:clear':
+      useBoardStore.getState().remoteClear()
+      break
+    case 'cursor':
+      useBoardStore.getState().setCursor(ev.userId, ev.x, ev.y)
+      break
+    case 'stroke:progress':
+      if (ev.userId === useBoardStore.getState().me.id) return
+      remoteDrafts.set(ev.stroke.id, { ...ev.stroke, ts: Date.now() })
+      break
+  }
+}
 
 const ME_KEY = 'board-me'
 
@@ -51,7 +79,7 @@ export default function BoardView({ boardId }: { boardId: string }) {
   const me = useBoardStore((s) => s.me)
   const { toast } = useToast()
 
-  const socketRef = useRef<Socket | null>(null)
+  const busRef = useRef<RealtimeBus | null>(null)
   const fittedRef = useRef(false)
 
   // init store with boardId + me
@@ -79,10 +107,10 @@ export default function BoardView({ boardId }: { boardId: string }) {
     []
   )
 
-  // create-or-fetch board, then connect socket
+  // create-or-fetch board, load snapshot, then join the realtime channel
   useEffect(() => {
     let cancelled = false
-    let socket: Socket | null = null
+    let bus: RealtimeBus | null = null
 
     const ensureBoard = async () => {
       try {
@@ -102,92 +130,57 @@ export default function BoardView({ boardId }: { boardId: string }) {
       }
     }
 
-    const connect = () => {
-      // Sandbox: gateway forwards '/?XTransformPort=3003' to the WS mini-service (path '/').
-      // Production: same origin, socket.io mounted on the Next server at '/socket.io'
-      // (set NEXT_PUBLIC_WS_URL='' + NEXT_PUBLIC_WS_PATH='/socket.io' at build time).
-      const wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? '/?XTransformPort=3003'
-      const wsPath = process.env.NEXT_PUBLIC_WS_PATH || '/'
-      const opts = {
-        path: wsPath,
-        transports: ['websocket', 'polling'],
-        reconnection: true,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
-        timeout: 10000,
+    const loadSnapshot = async () => {
+      try {
+        const res = await fetch(`/api/boards/${boardId}/elements`)
+        if (!res.ok) return
+        const data = (await res.json()) as { elements?: Array<BoardElement & { data?: Record<string, unknown> }> }
+        if (cancelled) return
+        const flat = (data.elements || []).map(fromWire).filter((e): e is BoardElement => e !== null)
+        useBoardStore.getState().replaceAll(flat)
+        remoteDrafts.clear()
+        if (!fittedRef.current && flat.length > 0) {
+          fittedRef.current = true
+          fitToContent(flat)
+        }
+      } catch {
+        /* offline: keep whatever we have */
       }
-      socket = wsUrl ? io(wsUrl, opts) : io(opts)
-      socketRef.current = socket
-      net.socket = socket
+    }
 
-      socket.on('connect', () => {
-        setStatus('online')
-        const s = useBoardStore.getState()
-        socket!.emit(
-          'board:join',
-          { boardId, user: { id: s.me.id, name: s.me.name, color: s.me.color } },
-          (res: { ok: boolean; elements?: Array<BoardElement & { data?: Record<string, unknown> }>; users?: UserData[] }) => {
-            if (!res?.ok || cancelled) return
-            const flat = (res.elements || []).map(fromWire).filter((e): e is BoardElement => e !== null)
-            s.replaceAll(flat)
-            s.setUsers(res.users || [])
-            remoteDrafts.clear()
-            if (!fittedRef.current && flat.length > 0) {
-              fittedRef.current = true
-              fitToContent(flat)
-            }
-          }
-        )
-      })
+    const connect = () => {
+      const s = useBoardStore.getState()
+      bus = new RealtimeBus()
+      busRef.current = bus
+      net.bus = bus
 
-      socket.on('disconnect', () => {
-        setStatus('offline')
-      })
-
-      socket.on('user:joined', ({ user }: { user: UserData }) => {
-        useBoardStore.getState().addUser(user)
-        toast({ title: `${user.name} присоединился` })
-      })
-
-      socket.on('user:left', ({ userId }: { userId: string }) => {
-        const s = useBoardStore.getState()
-        const u = s.users.find((x) => x.id === userId)
-        if (u) toast({ title: `${u.name} покинул доску` })
-        s.removeUser(userId)
-      })
-
-      socket.on('users', ({ users }: { users: UserData[] }) => {
-        useBoardStore.getState().setUsers(users)
-      })
-
-      socket.on('element:add', ({ element }: { element: BoardElement & { data?: Record<string, unknown> } }) => {
-        const el = fromWire(element)
-        if (el) useBoardStore.getState().remoteAdd(el)
-      })
-
-      socket.on('element:update', ({ element }: { element: BoardElement & { data?: Record<string, unknown> } }) => {
-        const el = fromWire(element)
-        if (el) useBoardStore.getState().remoteUpdate(el)
-      })
-
-      socket.on('element:delete', ({ ids }: { ids: string[] }) => {
-        useBoardStore.getState().remoteDelete(ids)
-      })
-
-      socket.on('elements:clear', () => {
-        useBoardStore.getState().remoteClear()
-        toast({ title: 'Доска очищена участником' })
-      })
-
-      socket.on('cursor', ({ userId, x, y }: { userId: string; x: number; y: number }) => {
-        useBoardStore.getState().setCursor(userId, x, y)
-      })
-
-      socket.on(
-        'stroke:progress',
-        ({ userId, stroke }: { userId: string; stroke: { id: string; points: number[]; color: string; width: number; marker: boolean } }) => {
-          if (userId === useBoardStore.getState().me.id) return
-          remoteDrafts.set(stroke.id, { ...stroke, ts: Date.now() })
+      bus.connect(
+        boardId,
+        { id: s.me.id, name: s.me.name, color: s.me.color },
+        {
+          onStatus: (st) => {
+            if (!cancelled) setStatus(st)
+          },
+          onUsers: (users) => {
+            if (!cancelled) useBoardStore.getState().setUsers(users)
+          },
+          onUserJoined: (user) => {
+            if (cancelled) return
+            useBoardStore.getState().addUser(user)
+            toast({ title: `${user.name} присоединился` })
+          },
+          onUserLeft: (user) => {
+            if (cancelled) return
+            const st = useBoardStore.getState()
+            const known = st.users.find((x) => x.id === user.id)
+            st.removeUser(user.id)
+            if (known) toast({ title: `${known.name} покинул доску` })
+          },
+          onEvent: (ev) => {
+            if (cancelled) return
+            if (ev.event === 'elements:clear') toast({ title: 'Доска очищена участником' })
+            handleRemoteEvent(ev)
+          },
         }
       )
     }
@@ -197,14 +190,19 @@ export default function BoardView({ boardId }: { boardId: string }) {
       if (cancelled) return
       if (board) useBoardStore.getState().setBoardName(board.name)
       upsertRecent(boardId, board?.name || 'Новая доска')
+      // join first (events received before the snapshot are buffered),
+      // then apply the snapshot, then unbuffer
       connect()
+      await loadSnapshot()
+      if (cancelled) return
+      busRef.current?.markReady()
     })()
 
     return () => {
       cancelled = true
-      socket?.disconnect()
-      socketRef.current = null
-      net.socket = null
+      bus?.disconnect()
+      busRef.current = null
+      net.bus = null
     }
   }, [boardId])
 
@@ -320,13 +318,7 @@ export default function BoardView({ boardId }: { boardId: string }) {
     } catch {
       /* ignore */
     }
-    socketRef.current?.emit(
-      'board:join',
-      { boardId, user: { id: s.me.id, name, color } },
-      (res: { ok: boolean; users?: UserData[] }) => {
-        if (res?.ok && res.users) s.setUsers(res.users)
-      }
-    )
+    busRef.current?.updateMe({ id: updated.id, name, color })
   }
 
   const goHome = () => {

@@ -355,9 +355,9 @@ export default function BoardCanvas() {
 
     // broadcast own cursor
     const now = Date.now()
-    if (now - lastCursorEmit.current > 45 && net.socket?.connected) {
+    if (now - lastCursorEmit.current > 45 && net.bus?.enabled) {
       lastCursorEmit.current = now
-      net.socket.emit('cursor', { boardId: net.boardId, x: p.x, y: p.y })
+      net.bus.send({ event: 'cursor', userId: useBoardStore.getState().me.id, x: p.x, y: p.y })
     }
 
     if (mode.current === 'pinch' && tracked?.type === 'touch') {
@@ -392,10 +392,11 @@ export default function BoardCanvas() {
           const wf = isPen ? Math.max(0.35, Math.min(2.4, e.pressure * 2.2)) : 1
           draft.points.push(p.x, p.y, wf)
         }
-        if (now - lastProgressEmit.current > 45 && net.socket?.connected && draftElementId.current) {
+        if (now - lastProgressEmit.current > 45 && net.bus?.enabled && draftElementId.current) {
           lastProgressEmit.current = now
-          net.socket.emit('stroke:progress', {
-            boardId: net.boardId,
+          net.bus.send({
+            event: 'stroke:progress',
+            userId: useBoardStore.getState().me.id,
             stroke: {
               id: draftElementId.current,
               points: draft.points.slice(-900),
@@ -426,9 +427,9 @@ export default function BoardCanvas() {
           s.updateLocal([moved])
           m.lastX = p.x
           m.lastY = p.y
-          if (now - lastUpdateEmit.current > 60 && net.socket?.connected) {
+          if (now - lastUpdateEmit.current > 60 && net.bus?.enabled) {
             lastUpdateEmit.current = now
-            net.socket.emit('element:update', { boardId: net.boardId, element: toWire(moved) })
+            net.bus.send({ event: 'element:update', element: toWire(moved) })
           }
         }
       }

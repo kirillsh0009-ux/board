@@ -27,6 +27,38 @@ function isValidElement(raw: unknown): raw is IncomingElement {
   return true
 }
 
+export async function GET(_request: NextRequest, { params }: RouteContext) {
+  try {
+    const { id: boardId } = await params
+
+    const elements = await db.element.findMany({
+      where: { boardId },
+      select: { id: true, type: true, data: true },
+    })
+
+    return NextResponse.json({
+      elements: elements.map((el) => ({
+        id: el.id,
+        type: el.type,
+        data: safeParse(el.data),
+      })),
+    })
+  } catch (error) {
+    console.error('[GET /api/boards/:id/elements] error:', error)
+    return NextResponse.json({ error: 'internal_error' }, { status: 500 })
+  }
+}
+
+function safeParse(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'string') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 export async function POST(request: NextRequest, { params }: RouteContext) {
   try {
     const { id: boardId } = await params

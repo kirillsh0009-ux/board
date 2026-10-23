@@ -3,7 +3,9 @@
 // The sandbox keeps using prisma/schema.prisma (SQLite) — keep models in sync!
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // rhel-openssl-3.0.x — Vercel serverless runtime (Amazon Linux 2023)
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
