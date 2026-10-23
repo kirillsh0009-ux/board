@@ -83,6 +83,11 @@ export interface FuncElement {
   expr: string
   /** graph viewport at stamp time: math coords of the center + px per unit */
   view: { cx: number; cy: number; scale: number }
+  /**
+   * id of the text element whose [func] token created this stamp. Closing that
+   * text's [func] panel again updates this stamp in place (no duplicates).
+   */
+  srcId?: string
 }
 
 export type BoardElement = PathElement | ShapeElement | StickyElement | TextElement | FuncElement

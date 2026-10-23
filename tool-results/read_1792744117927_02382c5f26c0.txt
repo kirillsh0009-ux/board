@@ -1,0 +1,695 @@
+     1→'use client'
+     2→
+     3→import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+     4→import { X, Plus, Minus, RotateCcw } from 'lucide-react'
+     5→import { compileAll, niceStep, fmtTick, splitExprs } from '@/lib/board/funcplot'
+     6→import type { TextElement } from '@/lib/board/types'
+     7→
+     8→const COLORS = ['#e11d48', '#059669', '#d97706', '#7c3aed', '#0891b2', '#65a30d']
+     9→const FUNC_TOKEN = '[func]'
+    10→
+    11→/** extract the expression stored after "[func]" in the element text */
+    12→export function extractFuncExpr(text: string): string {
+    13→  const idx = text.indexOf(FUNC_TOKEN)
+    14→  if (idx === -1) return ''
+    15→  const rest = text.slice(idx + FUNC_TOKEN.length)
+    16→  const lineEnd = rest.indexOf('\n')
+    17→  return (lineEnd === -1 ? rest : rest.slice(0, lineEnd)).trim()
+    18→}
+    19→
+    20→/** graph view stored inside a func stamp (math center + px per unit) */
+    21→export interface FuncView {
+    22→  cx: number
+    23→  cy: number
+    24→  scale: number
+    25→}
+    26→
+    27→/** everything the owner needs to stamp the currently visible graph onto the board */
+    28→export interface FuncStampData {
+    29→  expr: string
+    30→  view: FuncView
+    31→  /** graph canvas top-left in viewport (overlay) coordinates */
+    32→  sx: number
+    33→  sy: number
+    34→  /** graph canvas CSS size */
+    35→  w: number
+    36→  h: number
+    37→  /** PNG dataURL of the visible graph (rounded corners + frame baked in) */
+    38→  img: string | null
+    39→  /** at least one valid expression is plotted */
+    40→  valid: boolean
+    41→}
+    42→
+    43→export interface FuncStampApi {
+    44→  getStamp: () => FuncStampData | null
+    45→}
+    46→
+    47→interface FuncEditorProps {
+    48→  el?: TextElement
+    49→  /** stamp re-edit mode: seed expr/view/size from an existing func element */
+    50→  initial?: { expr: string; view: FuncView; w: number; h: number }
+    51→  anchor: { sx: number; sy: number }
+    52→  viewport: { w: number; h: number }
+    53→  containerRef: React.RefObject<HTMLDivElement | null>
+    54→  /** registered with getStamp() every render — call it before closing to stamp */
+    55→  stampApiRef?: React.MutableRefObject<FuncStampApi | null>
+    56→  onClose: () => void
+    57→  /** (text mode) writes the new element text back into the store */
+    58→  onWriteText?: (newText: string) => void
+    59→}
+    60→
+    61→/** build the new element text: replace the segment after the [func] token on its line */
+    62→export function withExpr(text: string, expr: string): string {
+    63→  const idx = text.indexOf(FUNC_TOKEN)
+    64→  const seg = expr.trim() ? ` ${expr.trim()}` : ''
+    65→  if (idx === -1) return expr.trim() ? `${text}${text ? '\n' : ''}${FUNC_TOKEN}${seg}`.trimStart() : text
+    66→  const lineEnd = text.indexOf('\n', idx)
+    67→  const at = idx + FUNC_TOKEN.length
+    68→  return text.slice(0, at) + seg + (lineEnd === -1 ? '' : text.slice(lineEnd))
+    69→}
+    70→
+    71→/** PNG snapshot with rounded corners + border baked in (corners transparent) */
+    72→function snapshotWithFrame(canvas: HTMLCanvasElement): string | null {
+    73→  const off = document.createElement('canvas')
+    74→  off.width = canvas.width
+    75→  off.height = canvas.height
+    76→  const ctx = off.getContext('2d')
+    77→  if (!ctx) return null
+    78→  ctx.drawImage(canvas, 0, 0)
+    79→  const cssW = canvas.getBoundingClientRect().width || canvas.width
+    80→  const px = canvas.width / cssW // device scale
+    81→  const r = 8 * px
+    82→  const lw = Math.max(1, Math.round(px))
+    83→  ctx.globalCompositeOperation = 'destination-in'
+    84→  rrPath(ctx, 0, 0, canvas.width, canvas.height, r)
+    85→  ctx.fillStyle = '#ffffff'
+    86→  ctx.fill()
+    87→  ctx.globalCompositeOperation = 'source-over'
+    88→  ctx.strokeStyle = '#d4d4d8'
+    89→  ctx.lineWidth = lw
+    90→  rrPath(ctx, lw / 2, lw / 2, canvas.width - lw, canvas.height - lw, r)
+    91→  ctx.stroke()
+    92→  return off.toDataURL('image/png')
+    93→}
+    94→
+    95→function rrPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+    96→  const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2))
+    97→  ctx.beginPath()
+    98→  if (typeof ctx.roundRect === 'function') {
+    99→    ctx.roundRect(x, y, w, h, rr)
+   100→  } else {
+   101→    ctx.moveTo(x + rr, y)
+   102→    ctx.arcTo(x + w, y, x + w, y + h, rr)
+   103→    ctx.arcTo(x + w, y + h, x, y + h, rr)
+   104→    ctx.arcTo(x, y + h, x, y, rr)
+   105→    ctx.arcTo(x, y, x + w, y, rr)
+   106→    ctx.closePath()
+   107→  }
+   108→}
+   109→
+   110→/** marching squares case table: bit 1=v00, 2=v10, 4=v11, 8=v01; edges 0=bottom,1=right,2=top,3=left */
+   111→const CASE_SEGS: Array<Array<[number, number]>> = [
+   112→  [],
+   113→  [[3, 0]],
+   114→  [[0, 1]],
+   115→  [[3, 1]],
+   116→  [[1, 2]],
+   117→  [[3, 2], [0, 1]],
+   118→  [[0, 2]],
+   119→  [[3, 2]],
+   120→  [[2, 3]],
+   121→  [[0, 2]],
+   122→  [[0, 3], [1, 2]],
+   123→  [[1, 2]],
+   124→  [[3, 1]],
+   125→  [[0, 1]],
+   126→  [[0, 3]],
+   127→  [],
+   128→]
+   129→
+   130→export default function FuncEditor({ el, initial, anchor, viewport, containerRef, stampApiRef, onClose, onWriteText }: FuncEditorProps) {
+   131→  const isStamp = initial !== undefined
+   132→  const [expr, setExpr] = useState(() => (initial ? initial.expr : el ? extractFuncExpr(el.text) : ''))
+   133→  const [size, setSize] = useState(() => (initial ? { w: initial.w, h: initial.h } : { w: 440, h: 250 }))
+   134→  const [view, setView] = useState<FuncView>(() =>
+   135→    initial ? { ...initial.view } : { cx: 0, cy: 0, scale: 440 / 13 }
+   136→  )
+   137→  const inputRef = useRef<HTMLInputElement>(null)
+   138→  const canvasRef = useRef<HTMLCanvasElement>(null)
+   139→  const rafRef = useRef(0)
+   140→  const dragRef = useRef<{ x: number; y: number } | null>(null)
+   141→  const resizeRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+   142→  const appliedRef = useRef(expr)
+   143→  const dirtyRef = useRef(false)
+   144→  const exprRef = useRef(expr)
+   145→  useEffect(() => {
+   146→    exprRef.current = expr
+   147→  })
+   148→
+   149→  const fns = useMemo(() => compileAll(expr), [expr])
+   150→  const firstError = fns.find((f) => f.error)?.error ?? null
+   151→  const hasAnything = splitExprs(expr).length > 0
+   152→
+   153→  // focus the expression input on open ("курсор переключается в окошко")
+   154→  useEffect(() => {
+   155→    const t = setTimeout(() => inputRef.current?.focus(), 30)
+   156→    return () => clearTimeout(t)
+   157→  }, [])
+   158→
+   159→  /** (text mode) write expression back into the element text (debounced) */
+   160→  useEffect(() => {
+   161→    if (isStamp) return
+   162→    if (expr === appliedRef.current) return
+   163→    const t = setTimeout(() => {
+   164→      appliedRef.current = expr
+   165→      dirtyRef.current = false
+   166→      onWriteText?.(expr)
+   167→    }, 400)
+   168→    return () => clearTimeout(t)
+   169→  }, [expr, isStamp, onWriteText])
+   170→
+   171→  /** (text mode) final write on close/unmount (expr via ref — the closure would be stale) */
+   172→  useEffect(() => {
+   173→    if (isStamp) return
+   174→    return () => {
+   175→      if (dirtyRef.current) {
+   176→        dirtyRef.current = false
+   177→        onWriteText?.(exprRef.current)
+   178→      }
+   179→    }
+   180→  }, [isStamp, onWriteText])
+   181→
+   182→  const markDirty = useCallback(() => {
+   183→    dirtyRef.current = true
+   184→  }, [])
+   185→
+   186→  // ---- graph drawing -------------------------------------------------------
+   187→  const draw = useCallback(() => {
+   188→    const canvas = canvasRef.current
+   189→    if (!canvas) return
+   190→    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+   191→    const { w, h } = size
+   192→    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+   193→      canvas.width = Math.round(w * dpr)
+   194→      canvas.height = Math.round(h * dpr)
+   195→    }
+   196→    const ctx = canvas.getContext('2d')
+   197→    if (!ctx) return
+   198→    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+   199→    ctx.clearRect(0, 0, w, h)
+   200→
+   201→    const { cx, cy, scale } = view
+   202→    const worldLeft = cx - w / 2 / scale
+   203→    const worldRight = cx + w / 2 / scale
+   204→    const worldTop = cy + h / 2 / scale
+   205→    const worldBottom = cy - h / 2 / scale
+   206→    const X = (wx: number) => (wx - cx) * scale + w / 2
+   207→    const Y = (wy: number) => h / 2 - (wy - cy) * scale
+   208→
+   209→    // grid
+   210→    const step = niceStep(scale)
+   211→    ctx.lineWidth = 1
+   212→    ctx.strokeStyle = '#f4f4f5'
+   213→    ctx.beginPath()
+   214→    for (let gx = Math.ceil(worldLeft / step) * step; gx <= worldRight; gx += step) {
+   215→      const px = Math.round(X(gx)) + 0.5
+   216→      ctx.moveTo(px, 0)
+   217→      ctx.lineTo(px, h)
+   218→    }
+   219→    for (let gy = Math.ceil(worldBottom / step) * step; gy <= worldTop; gy += step) {
+   220→      const py = Math.round(Y(gy)) + 0.5
+   221→      ctx.moveTo(0, py)
+   222→      ctx.lineTo(w, py)
+   223→    }
+   224→    ctx.stroke()
+   225→
+   226→    // axes
+   227→    ctx.strokeStyle = '#a1a1aa'
+   228→    ctx.beginPath()
+   229→    if (Y(0) >= 0 && Y(0) <= h) {
+   230→      ctx.moveTo(0, Math.round(Y(0)) + 0.5)
+   231→      ctx.lineTo(w, Math.round(Y(0)) + 0.5)
+   232→    }
+   233→    if (X(0) >= 0 && X(0) <= w) {
+   234→      ctx.moveTo(Math.round(X(0)) + 0.5, 0)
+   235→      ctx.lineTo(Math.round(X(0)) + 0.5, h)
+   236→    }
+   237→    ctx.stroke()
+   238→
+   239→    // tick labels
+   240→    ctx.fillStyle = '#71717a'
+   241→    ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+   242→    const xAxisY = Math.max(12, Math.min(h - 5, Y(0) + 12))
+   243→    for (let gx = Math.ceil(worldLeft / step) * step; gx <= worldRight; gx += step) {
+   244→      if (Math.abs(gx) < step / 2) continue
+   245→      ctx.fillText(fmtTick(gx, step), X(gx) + 2, xAxisY)
+   246→    }
+   247→    const yAxisX = Math.max(3, Math.min(w - 34, X(0) + 4))
+   248→    for (let gy = Math.ceil(worldBottom / step) * step; gy <= worldTop; gy += step) {
+   249→      if (Math.abs(gy) < step / 2) continue
+   250→      ctx.fillText(fmtTick(gy, step), yAxisX, Y(gy) - 3)
+   251→    }
+   252→
+   253→    // curves
+   254→    const valid = fns.filter((f) => !f.error && f.raw)
+   255→    const explicit = valid.filter((f) => !f.usesY)
+   256→    const implicit = valid.filter((f) => f.usesY)
+   257→
+   258→    let N = Math.round(Math.min(Math.max(w, 240), 700))
+   259→    if (explicit.length > 1) N = Math.min(N, Math.max(300, Math.floor(3600 / explicit.length)))
+   260→    const breakWorld = (h / scale) * 6
+   261→
+   262→    for (let k = 0; k < explicit.length; k++) {
+   263→      const f = explicit[k]
+   264→      ctx.beginPath()
+   265→      ctx.strokeStyle = COLORS[k % COLORS.length]
+   266→      ctx.lineWidth = 2
+   267→      ctx.lineJoin = 'round'
+   268→      let prevY: number | null = null
+   269→      for (let i = 0; i <= N; i++) {
+   270→        const wx = worldLeft + ((worldRight - worldLeft) * i) / N
+   271→        const y = f.f(wx, 0)
+   272→        if (!isFinite(y) || Math.abs(y) > 1e9) {
+   273→          prevY = null
+   274→          continue
+   275→        }
+   276→        const sy = Y(y)
+   277→        const jump = prevY !== null && Math.abs(y - prevY) > breakWorld
+   278→        const signFlip = prevY !== null && prevY * y < 0 && Math.abs(y - prevY) > (h / scale) * 1.5
+   279→        if (prevY === null || jump || signFlip) ctx.moveTo(X(wx), sy)
+   280→        else ctx.lineTo(X(wx), sy)
+   281→        prevY = y
+   282→      }
+   283→      ctx.stroke()
+   284→    }
+   285→
+   286→    // implicit curves (equations with y) via marching squares
+   287→    for (let k = 0; k < implicit.length; k++) {
+   288→      const f = implicit[k]
+   289→      ctx.beginPath()
+   290→      ctx.strokeStyle = COLORS[(explicit.length + k) % COLORS.length]
+   291→      ctx.lineWidth = 2
+   292→      const gw = 120
+   293→      const gh = Math.max(40, Math.round((120 * h) / w))
+   294→      const dx = (worldRight - worldLeft) / gw
+   295→      const dy = (worldTop - worldBottom) / gh
+   296→      const vals = new Float64Array((gw + 1) * (gh + 1))
+   297→      for (let j = 0; j <= gh; j++) {
+   298→        const wy = worldBottom + j * dy
+   299→        for (let i = 0; i <= gw; i++) {
+   300→          const v = f.f(worldLeft + i * dx, wy)
+   301→          vals[j * (gw + 1) + i] = isFinite(v) && Math.abs(v) < 1e12 ? v : NaN
+   302→        }
+   303→      }
+   304→      for (let j = 0; j < gh; j++) {
+   305→        for (let i = 0; i < gw; i++) {
+   306→          const v00 = vals[j * (gw + 1) + i]
+   307→          const v10 = vals[j * (gw + 1) + i + 1]
+   308→          const v11 = vals[(j + 1) * (gw + 1) + i + 1]
+   309→          const v01 = vals[(j + 1) * (gw + 1) + i]
+   310→          if (isNaN(v00) || isNaN(v10) || isNaN(v11) || isNaN(v01)) continue
+   311→          let cs = 0
+   312→          if (v00 > 0) cs |= 1
+   313→          if (v10 > 0) cs |= 2
+   314→          if (v11 > 0) cs |= 4
+   315→          if (v01 > 0) cs |= 8
+   316→          const segs = CASE_SEGS[cs]
+   317→          if (segs.length === 0) continue
+   318→          const bx = worldLeft + i * dx
+   319→          const by = worldBottom + j * dy
+   320→          const pts: Array<[number, number]> = [
+   321→            [bx + dx * (v00 / (v00 - v10)), by],
+   322→            [bx + dx, by + dy * (v10 / (v10 - v11))],
+   323→            [bx + dx * (v01 / (v01 - v11)), by + dy],
+   324→            [bx, by + dy * (v00 / (v00 - v01))],
+   325→          ]
+   326→          for (const [a, b] of segs) {
+   327→            ctx.moveTo(X(pts[a][0]), Y(pts[a][1]))
+   328→            ctx.lineTo(X(pts[b][0]), Y(pts[b][1]))
+   329→          }
+   330→        }
+   331→      }
+   332→      ctx.stroke()
+   333→    }
+   334→  }, [fns, size, view])
+   335→
+   336→  // rAF-throttled redraw
+   337→  useEffect(() => {
+   338→    cancelAnimationFrame(rafRef.current)
+   339→    rafRef.current = requestAnimationFrame(draw)
+   340→    return () => cancelAnimationFrame(rafRef.current)
+   341→  }, [draw])
+   342→
+   343→  // ---- interactions --------------------------------------------------------
+   344→  // wheel zoom around cursor (non-passive to preventDefault)
+   345→  useEffect(() => {
+   346→    const canvas = canvasRef.current
+   347→    if (!canvas) return
+   348→    const onWheel = (e: WheelEvent) => {
+   349→      e.preventDefault()
+   350→      const rect = canvas.getBoundingClientRect()
+   351→      const mx = e.clientX - rect.left
+   352→      const my = e.clientY - rect.top
+   353→      const factor = Math.exp(-e.deltaY * 0.0015)
+   354→      setView((v) => {
+   355→        const ns = Math.max(2, Math.min(5000, v.scale * factor))
+   356→        const wx = v.cx + (mx - size.w / 2) / v.scale
+   357→        const wy = v.cy + (size.h / 2 - my) / v.scale
+   358→        return { scale: ns, cx: wx - (mx - size.w / 2) / ns, cy: wy - (size.h / 2 - my) / ns }
+   359→      })
+   360→    }
+   361→    canvas.addEventListener('wheel', onWheel, { passive: false })
+   362→    return () => canvas.removeEventListener('wheel', onWheel)
+   363→  }, [size])
+   364→
+   365→  const zoomBy = (factor: number) =>
+   366→    setView((v) => ({ ...v, scale: Math.max(2, Math.min(5000, v.scale * factor)) }))
+   367→
+   368→  const resetView = () => setView({ cx: 0, cy: 0, scale: size.w / 13 })
+   369→
+   370→  const onCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   371→    e.preventDefault()
+   372→    try {
+   373→      ;(e.target as HTMLCanvasElement).setPointerCapture(e.pointerId)
+   374→    } catch {
+   375→      // pointer may already be released (or synthetic) — the drag still works
+   376→    }
+   377→    dragRef.current = { x: e.clientX, y: e.clientY }
+   378→  }
+   379→  const onCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   380→    const last = dragRef.current
+   381→    if (!last) return
+   382→    const dx = e.clientX - last.x
+   383→    const dy = e.clientY - last.y
+   384→    dragRef.current = { x: e.clientX, y: e.clientY }
+   385→    setView((v) => ({ ...v, cx: v.cx - dx / v.scale, cy: v.cy + dy / v.scale }))
+   386→  }
+   387→  const onCanvasPointerUp = () => {
+   388→    dragRef.current = null
+   389→  }
+   390→
+   391→  const onResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+   392→    e.preventDefault()
+   393→    e.stopPropagation()
+   394→    try {
+   395→      ;(e.target as HTMLDivElement).setPointerCapture(e.pointerId)
+   396→    } catch {
+   397→      // pointer may already be released (or synthetic) — the resize still works
+   398→    }
+   399→    resizeRef.current = { x: e.clientX, y: e.clientY, w: size.w, h: size.h }
+   400→  }
+   401→  const onResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+   402→    const st = resizeRef.current
+   403→    if (!st) return
+   404→    const maxW = Math.min(920, window.innerWidth - 28)
+   405→    const maxH = Math.min(640, window.innerHeight - 150)
+   406→    setSize({
+   407→      w: Math.max(260, Math.min(maxW, st.w + (e.clientX - st.x))),
+   408→      h: Math.max(180, Math.min(maxH, st.h + (e.clientY - st.y))),
+   409→    })
+   410→  }
+   411→  const onResizePointerUp = () => {
+   412→    resizeRef.current = null
+   413→  }
+   414→
+   415→  // ---- keypad actions (event handlers — ref access is fine here) -----------
+   416→  const insert = (str: string, caretBack = 0) => {
+   417→    markDirty()
+   418→    const input = inputRef.current
+   419→    if (!input) {
+   420→      setExpr((e) => e + str)
+   421→      return
+   422→    }
+   423→    const s = input.selectionStart ?? input.value.length
+   424→    const eEnd = input.selectionEnd ?? s
+   425→    const next = input.value.slice(0, s) + str + input.value.slice(eEnd)
+   426→    setExpr(next)
+   427→    requestAnimationFrame(() => {
+   428→      input.focus()
+   429→      const pos = s + str.length - caretBack
+   430→      input.setSelectionRange(pos, pos)
+   431→    })
+   432→  }
+   433→
+   434→  const backspace = () => {
+   435→    markDirty()
+   436→    const input = inputRef.current
+   437→    if (!input) {
+   438→      setExpr((e) => e.slice(0, -1))
+   439→      return
+   440→    }
+   441→    const s = input.selectionStart ?? input.value.length
+   442→    const eEnd = input.selectionEnd ?? s
+   443→    if (s !== eEnd) {
+   444→      const next = input.value.slice(0, s) + input.value.slice(eEnd)
+   445→      setExpr(next)
+   446→      requestAnimationFrame(() => {
+   447→        input.focus()
+   448→        input.setSelectionRange(s, s)
+   449→      })
+   450→    } else if (s > 0) {
+   451→      const next = input.value.slice(0, s - 1) + input.value.slice(s)
+   452→      setExpr(next)
+   453→      requestAnimationFrame(() => {
+   454→        input.focus()
+   455→        input.setSelectionRange(s - 1, s - 1)
+   456→      })
+   457→    }
+   458→  }
+   459→
+   460→  // ---- panel position ------------------------------------------------------
+   461→  const panelW = size.w + 28
+   462→  const narrow = viewport.w < 640
+   463→  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+   464→  // text mode: panel to the right of the text anchor; stamp mode: cover the stamp
+   465→  const left = narrow
+   466→    ? clamp((viewport.w - panelW) / 2, 8, Math.max(8, viewport.w - panelW - 10))
+   467→    : clamp(initial ? anchor.sx - 13 : anchor.sx + 22, 8, Math.max(8, viewport.w - panelW - 10))
+   468→  const top = narrow
+   469→    ? 72
+   470→    : clamp(initial ? anchor.sy - 96 : anchor.sy - 10, 60, Math.max(60, viewport.h - 200))
+   471→
+   472→  // ---- stamp API: fresh closure every render (reads left/top/size/view) ----
+   473→  useEffect(() => {
+   474→    if (!stampApiRef) return
+   475→    stampApiRef.current = {
+   476→      getStamp: () => {
+   477→        const canvas = canvasRef.current
+   478→        if (!canvas) return null
+   479→        let img: string | null = null
+   480→        try {
+   481→          img = snapshotWithFrame(canvas)
+   482→        } catch {
+   483→          img = null
+   484→        }
+   485→        // canvas offset inside the panel -> panel position is known in viewport coords
+   486→        const panel = containerRef.current
+   487→        const rect = canvas.getBoundingClientRect()
+   488→        let dx = 13
+   489→        let dy = 100
+   490→        if (panel) {
+   491→          const pr = panel.getBoundingClientRect()
+   492→          dx = rect.left - pr.left
+   493→          dy = rect.top - pr.top
+   494→        }
+   495→        return {
+   496→          expr,
+   497→          view: { ...view },
+   498→          sx: left + dx,
+   499→          sy: top + dy,
+   500→          w: size.w,
+   501→          h: size.h,
+   502→          img,
+   503→          valid: fns.some((f) => !f.error && f.raw),
+   504→        }
+   505→      },
+   506→    }
+   507→    return () => {
+   508→      stampApiRef.current = null
+   509→    }
+   510→  })
+   511→
+   512→  return (
+   513→    <div
+   514→      ref={containerRef}
+   515→      role="dialog"
+   516→      aria-label={isStamp ? 'Редактирование графика' : 'Редактор функции'}
+   517→      data-testid="func-editor"
+   518→      className="pointer-events-auto absolute flex flex-col rounded-xl border border-zinc-200 bg-white shadow-2xl"
+   519→      style={{ left, top, width: panelW, maxHeight: Math.max(240, viewport.h - top - 16) }}
+   520→      onKeyDown={(e) => {
+   521→        if (e.key === 'Escape') {
+   522→          e.preventDefault()
+   523→          e.stopPropagation()
+   524→          onClose()
+   525→        }
+   526→        e.stopPropagation()
+   527→      }}
+   528→    >
+   529→      {/* header */}
+   530→      <div className="flex items-center justify-between rounded-t-xl border-b border-zinc-100 bg-zinc-50/80 px-3 py-2">
+   531→        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700">
+   532→          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-zinc-800 font-serif italic text-white">ƒ</span>
+   533→          {isStamp ? 'Редактирование графика' : 'График функции'}
+   534→        </div>
+   535→        <div className="flex items-center gap-0.5">
+   536→          <button type="button" aria-label="Отдалить график" onClick={() => zoomBy(1 / 1.3)} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   537→            <Minus className="h-3.5 w-3.5" />
+   538→          </button>
+   539→          <button type="button" aria-label="Приблизить график" onClick={() => zoomBy(1.3)} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   540→            <Plus className="h-3.5 w-3.5" />
+   541→          </button>
+   542→          <button type="button" aria-label="Сбросить вид графика" onClick={resetView} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   543→            <RotateCcw className="h-3.5 w-3.5" />
+   544→          </button>
+   545→          <button type="button" aria-label="Закрыть редактор функции" data-testid="func-close" onClick={onClose} className="ml-1 flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   546→            <X className="h-4 w-4" />
+   547→          </button>
+   548→        </div>
+   549→      </div>
+   550→
+   551→      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-3 pt-2">
+   552→        {/* expression input */}
+   553→        <input
+   554→          ref={inputRef}
+   555→          data-testid="func-input"
+   556→          value={expr}
+   557→          onChange={(e) => {
+   558→            markDirty()
+   559→            setExpr(e.target.value)
+   560→          }}
+   561→          onKeyDown={(e) => e.stopPropagation()}
+   562→          placeholder="sin(x); x^2 + 3x"
+   563→          autoComplete="off"
+   564→          spellCheck={false}
+   565→          aria-label="Выражение функции"
+   566→          className="w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-800 outline-none placeholder:text-zinc-400 focus:border-zinc-500"
+   567→        />
+   568→        {firstError ? (
+   569→          <p data-testid="func-error" className="mt-1 text-xs font-medium text-rose-600">
+   570→            {firstError}
+   571→          </p>
+   572→        ) : null}
+   573→
+   574→        {/* graph */}
+   575→        <div className="relative mt-2 overflow-hidden rounded-lg border border-zinc-200" style={{ width: size.w, height: size.h }}>
+   576→          <canvas
+   577→            ref={canvasRef}
+   578→            data-testid="func-canvas"
+   579→            width={size.w}
+   580→            height={size.h}
+   581→            className="block cursor-grab touch-none"
+   582→            style={{ width: size.w, height: size.h }}
+   583→            onPointerDown={onCanvasPointerDown}
+   584→            onPointerMove={onCanvasPointerMove}
+   585→            onPointerUp={onCanvasPointerUp}
+   586→            onPointerCancel={onCanvasPointerUp}
+   587→            aria-label="График функции"
+   588→          />
+   589→          {!hasAnything ? (
+   590→            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+   591→              <p className="rounded-lg bg-white/85 px-3 py-1.5 text-xs text-zinc-500">Введите функцию — график появится здесь</p>
+   592→            </div>
+   593→          ) : null}
+   594→          {/* resize handle */}
+   595→          <div
+   596→            data-testid="func-resize"
+   597→            onPointerDown={onResizePointerDown}
+   598→            onPointerMove={onResizePointerMove}
+   599→            onPointerUp={onResizePointerUp}
+   600→            onPointerCancel={onResizePointerUp}
+   601→            role="separator"
+   602→            aria-label="Изменить размер графика"
+   603→            className="absolute bottom-0 right-0 flex h-5 w-5 cursor-nwse-resize touch-none items-end justify-end rounded-tl-md bg-gradient-to-br from-transparent to-zinc-300"
+   604→            style={{ borderBottomRightRadius: 7 }}
+   605→          >
+   606→            <svg viewBox="0 0 8 8" className="h-2 w-2 text-zinc-500">
+   607→              <path d="M7 1 L1 7 M7 4 L4 7" stroke="currentColor" strokeWidth="1.2" fill="none" />
+   608→            </svg>
+   609→          </div>
+   610→        </div>
+   611→
+   612→        {/* legend */}
+   613→        {fns.length > 0 ? (
+   614→          <div className="mt-1.5 flex flex-wrap gap-1.5" data-testid="func-legend">
+   615→            {fns.map((f, i) =>
+   616→              f.error ? null : (
+   617→                <span key={i} className="flex max-w-full items-center gap-1 rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600">
+   618→                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: COLORS[colorIndexFor(fns, i) % COLORS.length] }} />
+   619→                  <span className="truncate font-mono">{f.raw.length > 26 ? `${f.raw.slice(0, 26)}…` : f.raw}</span>
+   620→                </span>
+   621→              )
+   622→            )}
+   623→          </div>
+   624→        ) : null}
+   625→
+   626→        {/* keypad */}
+   627→        <div className="mt-2 grid grid-cols-6 gap-1">
+   628→          {KEYPAD.map((k) => (
+   629→            <button
+   630→              key={k.label}
+   631→              type="button"
+   632→              data-testid={k.testId}
+   633→              onMouseDown={(e) => e.preventDefault()}
+   634→              onClick={() => (k.del ? backspace() : insert(k.ins ?? '', k.back ?? 0))}
+   635→              className="flex h-8 items-center justify-center rounded-md border border-zinc-200 bg-white text-xs font-medium text-zinc-700 hover:bg-zinc-100 active:bg-zinc-200"
+   636→            >
+   637→              {k.label}
+   638→            </button>
+   639→          ))}
+   640→        </div>
+   641→
+   642→        <p className="mt-2 text-[11px] leading-4 text-zinc-400">
+   643→          Тап мимо окна — график отпечатается на доску (та часть, что видна сейчас). Тап по отпечатку — снова открыть редактор.
+   644→        </p>
+   645→      </div>
+   646→    </div>
+   647→  )
+   648→}
+   649→
+   650→/** legend color index matching the draw order: explicit curves first, then implicit */
+   651→function colorIndexFor(fns: Array<{ usesY: boolean; error: string | null }>, i: number): number {
+   652→  let explicitBefore = 0
+   653→  let implicitBefore = 0
+   654→  for (let k = 0; k < i; k++) {
+   655→    if (fns[k].error) continue
+   656→    if (fns[k].usesY) implicitBefore++
+   657→    else explicitBefore++
+   658→  }
+   659→  return fns[i].usesY ? explicitBefore + implicitBefore : explicitBefore
+   660→}
+   661→
+   662→/** math keypad: insertion strings + optional caret shift back (for "fn()" inserts) */
+   663→const KEYPAD: Array<{ label: string; ins?: string; back?: number; del?: boolean; testId?: string }> = [
+   664→  { label: 'x', ins: 'x', testId: 'func-key-x' },
+   665→  { label: 'y', ins: 'y', testId: 'func-key-y' },
+   666→  { label: 'π', ins: 'pi', testId: 'func-key-pi' },
+   667→  { label: 'x²', ins: '^2', testId: 'func-key-sq' },
+   668→  { label: 'xⁿ', ins: '^', testId: 'func-key-pow' },
+   669→  { label: '√', ins: 'sqrt()', back: 1, testId: 'func-key-sqrt' },
+   670→  { label: '7', ins: '7' },
+   671→  { label: '8', ins: '8' },
+   672→  { label: '9', ins: '9' },
+   673→  { label: '÷', ins: '/' },
+   674→  { label: '×', ins: '*' },
+   675→  { label: '−', ins: '-' },
+   676→  { label: '4', ins: '4' },
+   677→  { label: '5', ins: '5' },
+   678→  { label: '6', ins: '6' },
+   679→  { label: '+', ins: '+' },
+   680→  { label: '(', ins: '(' },
+   681→  { label: ')', ins: ')' },
+   682→  { label: '1', ins: '1' },
+   683→  { label: '2', ins: '2' },
+   684→  { label: '3', ins: '3' },
+   685→  { label: '0', ins: '0' },
+   686→  { label: '.', ins: '.' },
+   687→  { label: ';', ins: '; ', testId: 'func-key-sep' },
+   688→  { label: 'sin', ins: 'sin()', back: 1, testId: 'func-key-sin' },
+   689→  { label: 'cos', ins: 'cos()', back: 1 },
+   690→  { label: 'tan', ins: 'tan()', back: 1 },
+   691→  { label: 'ln', ins: 'ln()', back: 1 },
+   692→  { label: 'log', ins: 'log()', back: 1 },
+   693→  { label: '⌫', del: true, testId: 'func-key-back' },
+   694→]
+   695→

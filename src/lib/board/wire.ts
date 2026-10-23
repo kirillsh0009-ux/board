@@ -51,6 +51,7 @@ export function fromWire(raw: WireElement | Partial<BoardElement>): BoardElement
       if (typeof rest.expr !== 'string' || rest.expr.length > 2000) return null
       const v = rest.view as { cx?: unknown; cy?: unknown; scale?: unknown } | null | undefined
       if (!v || !num(v.cx) || !num(v.cy) || !num(v.scale)) return null
+      if (rest.srcId !== undefined && (typeof rest.srcId !== 'string' || rest.srcId.length > 64)) return null
       break
     }
     default:

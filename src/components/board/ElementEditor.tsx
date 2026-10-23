@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useBoardStore } from '@/lib/board/store'
 import type { BoardElement, FuncElement, StickyElement, TextElement } from '@/lib/board/types'
-import FuncEditor, { withExpr, type FuncStampApi } from './FuncEditor'
+import FuncEditor, { withExpr, type FuncStampApi, type FuncView } from './FuncEditor'
 import { uid } from '@/lib/board/utils'
 
 export default function ElementEditor() {
@@ -36,60 +36,109 @@ export default function ElementEditor() {
     setFuncOpen(hasFunc)
   }
 
+  /** keep the source text's [func] expression in sync after a stamp re-edit */
+  const syncSourceText = useCallback((stamp: FuncElement) => {
+    const s = useBoardStore.getState()
+    if (!stamp.srcId) return
+    const src = s.elements.get(stamp.srcId)
+    if (!src || src.type !== 'text') return
+    const newText = withExpr(src.text, stamp.expr)
+    if (newText === src.text) return
+    const updated = { ...src, text: newText } as TextElement
+    s.updateLocal([updated])
+    s.broadcastUpdate([updated])
+  }, [])
+
   /**
    * Stamp the currently visible graph onto the board.
-   * existing === null -> create a new stamp (closing the [func] panel of a text
-   * element); otherwise update that func element in place (re-editing a stamp).
+   * source is a func element -> re-stamp it in place (re-editing a stamp).
+   * source is a text element -> update the stamp created by this text
+   * (matched by srcId), or create the first stamp. Matching prevents the
+   * duplicate-stamp bug: every later close of the same [func] panel used to
+   * spawn another copy.
    * No-op when the panel has no snapshot (already closed) or nothing is plotted.
    */
-  const applyStamp = useCallback((existing: FuncElement | null) => {
-    const api = stampApiRef.current
-    if (!api) return
-    const data = api.getStamp()
-    if (!data || !data.img) return
-    const s = useBoardStore.getState()
-    const cam = s.camera
-    const vp = s.viewport
-    // the stamp keeps the popup's on-screen size: convert screen -> world
-    const wx = (data.sx - vp.w / 2) / cam.zoom + cam.x
-    const wy = (data.sy - vp.h / 2) / cam.zoom + cam.y
-    const w = data.w / cam.zoom
-    const h = data.h / cam.zoom
-    const view = { ...data.view }
-    if (existing) {
-      // keep the old stamp when nothing is plotted (empty/typo) — don't wipe it
-      if (!data.valid) return
-      const same =
-        existing.x === wx &&
-        existing.y === wy &&
-        existing.w === w &&
-        existing.h === h &&
-        existing.img === data.img &&
-        existing.expr === data.expr &&
-        existing.view.cx === view.cx &&
-        existing.view.cy === view.cy &&
-        existing.view.scale === view.scale
-      if (same) return
-      const updated: FuncElement = { ...existing, x: wx, y: wy, w, h, img: data.img, expr: data.expr, view }
-      s.updateLocal([updated])
-      s.broadcastUpdate([updated])
-      s.pushOp({ kind: 'update', before: existing, after: updated })
-      return
-    }
-    if (!data.valid) return // nothing plotted -> no stamp
-    const created: FuncElement = {
-      id: uid(),
-      type: 'func',
-      x: wx,
-      y: wy,
-      w,
-      h,
-      img: data.img,
-      expr: data.expr,
-      view,
-    }
-    s.addElements([created])
-  }, [])
+  const applyStamp = useCallback(
+    (source: FuncElement | TextElement) => {
+      const api = stampApiRef.current
+      if (!api) return
+      const data = api.getStamp()
+      if (!data || !data.img) return
+      const s = useBoardStore.getState()
+      const cam = s.camera
+      const vp = s.viewport
+      // the stamp keeps the popup's on-screen size: convert screen -> world
+      const wx = (data.sx - vp.w / 2) / cam.zoom + cam.x
+      const wy = (data.sy - vp.h / 2) / cam.zoom + cam.y
+      const w = data.w / cam.zoom
+      const h = data.h / cam.zoom
+      const view = { ...data.view }
+
+      if (source.type === 'func') {
+        // keep the old stamp when nothing is plotted (empty/typo) — don't wipe it
+        if (!data.valid) return
+        const existing = source
+        const same =
+          existing.x === wx &&
+          existing.y === wy &&
+          existing.w === w &&
+          existing.h === h &&
+          existing.img === data.img &&
+          existing.expr === data.expr &&
+          existing.view.cx === view.cx &&
+          existing.view.cy === view.cy &&
+          existing.view.scale === view.scale
+        if (same) return
+        const updated: FuncElement = { ...existing, x: wx, y: wy, w, h, img: data.img, expr: data.expr, view }
+        s.updateLocal([updated])
+        s.broadcastUpdate([updated])
+        s.pushOp({ kind: 'update', before: existing, after: updated })
+        syncSourceText(updated)
+        return
+      }
+
+      if (!data.valid) return // nothing plotted -> no stamp
+      let linked: FuncElement | null = null
+      for (const e of s.elements.values()) {
+        if (e.type === 'func' && (e as FuncElement).srcId === source.id) {
+          linked = e as FuncElement
+          break
+        }
+      }
+      if (linked) {
+        // update the linked stamp in place, keeping its board position
+        if (
+          linked.w === w &&
+          linked.h === h &&
+          linked.img === data.img &&
+          linked.expr === data.expr &&
+          linked.view.cx === view.cx &&
+          linked.view.cy === view.cy &&
+          linked.view.scale === view.scale
+        )
+          return
+        const updated: FuncElement = { ...linked, w, h, img: data.img, expr: data.expr, view }
+        s.updateLocal([updated])
+        s.broadcastUpdate([updated])
+        s.pushOp({ kind: 'update', before: linked, after: updated })
+        return
+      }
+      const created: FuncElement = {
+        id: uid(),
+        type: 'func',
+        x: wx,
+        y: wy,
+        w,
+        h,
+        img: data.img,
+        expr: data.expr,
+        view,
+        srcId: source.id,
+      }
+      s.addElements([created])
+    },
+    [syncSourceText],
+  )
 
   /** save & close; reads everything from the store so it never works on stale data */
   const commit = useCallback(() => {
@@ -105,9 +154,9 @@ export default function ElementEditor() {
     }
     const before = initialRef.current && initialRef.current.id === id ? initialRef.current : null
     if (current && (current.type === 'sticky' || current.type === 'text')) {
-      // [func] panel is open -> the graph gets stamped onto the board before closing
+      // [func] panel is open -> update this text's stamp (or create it once) before closing
       if (current.type === 'text' && funcOpenRef.current) {
-        applyStamp(null)
+        applyStamp(current)
       }
       const text = current.text.trim()
       if (!text) {
@@ -152,7 +201,7 @@ export default function ElementEditor() {
       s.setEditing(null)
       return
     }
-    applyStamp(null)
+    if (cur?.type === 'text') applyStamp(cur)
     setFuncOpen(false)
     taRef.current?.focus()
   }, [applyStamp])
@@ -241,6 +290,22 @@ export default function ElementEditor() {
   const isSticky = el.type === 'sticky'
   const fontSize = isSticky ? 16 * camera.zoom : (el as TextElement).size * camera.zoom
 
+  // seed the reopened panel from this text's stamp (pan/zoom/size survive)
+  let funcSeed: { view: FuncView; w: number; h: number } | undefined
+  if (isText) {
+    for (const e of elements.values()) {
+      if (e.type === 'func' && (e as FuncElement).srcId === el.id) {
+        const st = e as FuncElement
+        funcSeed = {
+          view: { ...st.view },
+          w: Math.max(260, Math.min(920, Math.round(st.w * camera.zoom))),
+          h: Math.max(180, Math.min(640, Math.round(st.h * camera.zoom))),
+        }
+        break
+      }
+    }
+  }
+
   return (
     <div className="pointer-events-none absolute inset-0 z-40">
       <textarea
@@ -277,7 +342,7 @@ export default function ElementEditor() {
           e.stopPropagation()
         }}
         aria-label={isSticky ? 'Текст стикера' : 'Текст'}
-        placeholder={isSticky ? 'Введите текст…' : 'Введите текст… (подсказка: [func] — график функции)'}
+        placeholder="Введите текст…"
         className={
           isSticky
             ? 'pointer-events-auto absolute resize-none rounded-md border-2 border-zinc-800/80 shadow-xl outline-none placeholder:text-zinc-500'
@@ -300,6 +365,7 @@ export default function ElementEditor() {
       {isText && funcOpen ? (
         <FuncEditor
           el={el as TextElement}
+          seed={funcSeed}
           anchor={{ sx, sy }}
           viewport={viewport}
           containerRef={funcPanelRef}

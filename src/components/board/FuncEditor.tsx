@@ -48,6 +48,8 @@ interface FuncEditorProps {
   el?: TextElement
   /** stamp re-edit mode: seed expr/view/size from an existing func element */
   initial?: { expr: string; view: FuncView; w: number; h: number }
+  /** text mode: reopen seed from this text's linked stamp (view/size survive) */
+  seed?: { view: FuncView; w: number; h: number }
   anchor: { sx: number; sy: number }
   viewport: { w: number; h: number }
   containerRef: React.RefObject<HTMLDivElement | null>
@@ -127,12 +129,13 @@ const CASE_SEGS: Array<Array<[number, number]>> = [
   [],
 ]
 
-export default function FuncEditor({ el, initial, anchor, viewport, containerRef, stampApiRef, onClose, onWriteText }: FuncEditorProps) {
+export default function FuncEditor({ el, initial, seed, anchor, viewport, containerRef, stampApiRef, onClose, onWriteText }: FuncEditorProps) {
   const isStamp = initial !== undefined
+  const seedSrc = initial ?? seed
   const [expr, setExpr] = useState(() => (initial ? initial.expr : el ? extractFuncExpr(el.text) : ''))
-  const [size, setSize] = useState(() => (initial ? { w: initial.w, h: initial.h } : { w: 440, h: 250 }))
+  const [size, setSize] = useState(() => (seedSrc ? { w: seedSrc.w, h: seedSrc.h } : { w: 440, h: 250 }))
   const [view, setView] = useState<FuncView>(() =>
-    initial ? { ...initial.view } : { cx: 0, cy: 0, scale: 440 / 13 }
+    seedSrc ? { ...seedSrc.view } : { cx: 0, cy: 0, scale: 440 / 13 }
   )
   const inputRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -638,10 +641,6 @@ export default function FuncEditor({ el, initial, anchor, viewport, containerRef
             </button>
           ))}
         </div>
-
-        <p className="mt-2 text-[11px] leading-4 text-zinc-400">
-          Тап мимо окна — график отпечатается на доску (та часть, что видна сейчас). Тап по отпечатку — снова открыть редактор.
-        </p>
       </div>
     </div>
   )
