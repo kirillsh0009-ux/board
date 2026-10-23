@@ -1,0 +1,694 @@
+     1→     1→'use client'
+     2→     2→
+     3→     3→import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+     4→     4→import { X, Plus, Minus, RotateCcw } from 'lucide-react'
+     5→     5→import { compileAll, niceStep, fmtTick, splitExprs } from '@/lib/board/funcplot'
+     6→     6→import type { TextElement } from '@/lib/board/types'
+     7→     7→
+     8→     8→const COLORS = ['#e11d48', '#059669', '#d97706', '#7c3aed', '#0891b2', '#65a30d']
+     9→     9→const FUNC_TOKEN = '[func]'
+    10→    10→
+    11→    11→/** extract the expression stored after "[func]" in the element text */
+    12→    12→export function extractFuncExpr(text: string): string {
+    13→    13→  const idx = text.indexOf(FUNC_TOKEN)
+    14→    14→  if (idx === -1) return ''
+    15→    15→  const rest = text.slice(idx + FUNC_TOKEN.length)
+    16→    16→  const lineEnd = rest.indexOf('\n')
+    17→    17→  return (lineEnd === -1 ? rest : rest.slice(0, lineEnd)).trim()
+    18→    18→}
+    19→    19→
+    20→    20→/** graph view stored inside a func stamp (math center + px per unit) */
+    21→    21→export interface FuncView {
+    22→    22→  cx: number
+    23→    23→  cy: number
+    24→    24→  scale: number
+    25→    25→}
+    26→    26→
+    27→    27→/** everything the owner needs to stamp the currently visible graph onto the board */
+    28→    28→export interface FuncStampData {
+    29→    29→  expr: string
+    30→    30→  view: FuncView
+    31→    31→  /** graph canvas top-left in viewport (overlay) coordinates */
+    32→    32→  sx: number
+    33→    33→  sy: number
+    34→    34→  /** graph canvas CSS size */
+    35→    35→  w: number
+    36→    36→  h: number
+    37→    37→  /** PNG dataURL of the visible graph (rounded corners + frame baked in) */
+    38→    38→  img: string | null
+    39→    39→  /** at least one valid expression is plotted */
+    40→    40→  valid: boolean
+    41→    41→}
+    42→    42→
+    43→    43→export interface FuncStampApi {
+    44→    44→  getStamp: () => FuncStampData | null
+    45→    45→}
+    46→    46→
+    47→    47→interface FuncEditorProps {
+    48→    48→  el?: TextElement
+    49→    49→  /** stamp re-edit mode: seed expr/view/size from an existing func element */
+    50→    50→  initial?: { expr: string; view: FuncView; w: number; h: number }
+    51→    51→  /** text mode: reopen seed from this text's linked stamp (view/size survive) */
+    52→    52→  seed?: { view: FuncView; w: number; h: number }
+    53→    53→  anchor: { sx: number; sy: number }
+    54→    54→  viewport: { w: number; h: number }
+    55→    55→  containerRef: React.RefObject<HTMLDivElement | null>
+    56→    56→  /** registered with getStamp() every render — call it before closing to stamp */
+    57→    57→  stampApiRef?: React.MutableRefObject<FuncStampApi | null>
+    58→    58→  onClose: () => void
+    59→    59→  /** (text mode) writes the new element text back into the store */
+    60→    60→  onWriteText?: (newText: string) => void
+    61→    61→}
+    62→    62→
+    63→    63→/** build the new element text: replace the segment after the [func] token on its line */
+    64→    64→export function withExpr(text: string, expr: string): string {
+    65→    65→  const idx = text.indexOf(FUNC_TOKEN)
+    66→    66→  const seg = expr.trim() ? ` ${expr.trim()}` : ''
+    67→    67→  if (idx === -1) return expr.trim() ? `${text}${text ? '\n' : ''}${FUNC_TOKEN}${seg}`.trimStart() : text
+    68→    68→  const lineEnd = text.indexOf('\n', idx)
+    69→    69→  const at = idx + FUNC_TOKEN.length
+    70→    70→  return text.slice(0, at) + seg + (lineEnd === -1 ? '' : text.slice(lineEnd))
+    71→    71→}
+    72→    72→
+    73→    73→/** PNG snapshot with rounded corners + border baked in (corners transparent) */
+    74→    74→function snapshotWithFrame(canvas: HTMLCanvasElement): string | null {
+    75→    75→  const off = document.createElement('canvas')
+    76→    76→  off.width = canvas.width
+    77→    77→  off.height = canvas.height
+    78→    78→  const ctx = off.getContext('2d')
+    79→    79→  if (!ctx) return null
+    80→    80→  ctx.drawImage(canvas, 0, 0)
+    81→    81→  const cssW = canvas.getBoundingClientRect().width || canvas.width
+    82→    82→  const px = canvas.width / cssW // device scale
+    83→    83→  const r = 8 * px
+    84→    84→  const lw = Math.max(1, Math.round(px))
+    85→    85→  ctx.globalCompositeOperation = 'destination-in'
+    86→    86→  rrPath(ctx, 0, 0, canvas.width, canvas.height, r)
+    87→    87→  ctx.fillStyle = '#ffffff'
+    88→    88→  ctx.fill()
+    89→    89→  ctx.globalCompositeOperation = 'source-over'
+    90→    90→  ctx.strokeStyle = '#d4d4d8'
+    91→    91→  ctx.lineWidth = lw
+    92→    92→  rrPath(ctx, lw / 2, lw / 2, canvas.width - lw, canvas.height - lw, r)
+    93→    93→  ctx.stroke()
+    94→    94→  return off.toDataURL('image/png')
+    95→    95→}
+    96→    96→
+    97→    97→function rrPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+    98→    98→  const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2))
+    99→    99→  ctx.beginPath()
+   100→   100→  if (typeof ctx.roundRect === 'function') {
+   101→   101→    ctx.roundRect(x, y, w, h, rr)
+   102→   102→  } else {
+   103→   103→    ctx.moveTo(x + rr, y)
+   104→   104→    ctx.arcTo(x + w, y, x + w, y + h, rr)
+   105→   105→    ctx.arcTo(x + w, y + h, x, y + h, rr)
+   106→   106→    ctx.arcTo(x, y + h, x, y, rr)
+   107→   107→    ctx.arcTo(x, y, x + w, y, rr)
+   108→   108→    ctx.closePath()
+   109→   109→  }
+   110→   110→}
+   111→   111→
+   112→   112→/** marching squares case table: bit 1=v00, 2=v10, 4=v11, 8=v01; edges 0=bottom,1=right,2=top,3=left */
+   113→   113→const CASE_SEGS: Array<Array<[number, number]>> = [
+   114→   114→  [],
+   115→   115→  [[3, 0]],
+   116→   116→  [[0, 1]],
+   117→   117→  [[3, 1]],
+   118→   118→  [[1, 2]],
+   119→   119→  [[3, 2], [0, 1]],
+   120→   120→  [[0, 2]],
+   121→   121→  [[3, 2]],
+   122→   122→  [[2, 3]],
+   123→   123→  [[0, 2]],
+   124→   124→  [[0, 3], [1, 2]],
+   125→   125→  [[1, 2]],
+   126→   126→  [[3, 1]],
+   127→   127→  [[0, 1]],
+   128→   128→  [[0, 3]],
+   129→   129→  [],
+   130→   130→]
+   131→   131→
+   132→   132→export default function FuncEditor({ el, initial, seed, anchor, viewport, containerRef, stampApiRef, onClose, onWriteText }: FuncEditorProps) {
+   133→   133→  const isStamp = initial !== undefined
+   134→   134→  const seedSrc = initial ?? seed
+   135→   135→  const [expr, setExpr] = useState(() => (initial ? initial.expr : el ? extractFuncExpr(el.text) : ''))
+   136→   136→  const [size, setSize] = useState(() => (seedSrc ? { w: seedSrc.w, h: seedSrc.h } : { w: 440, h: 250 }))
+   137→   137→  const [view, setView] = useState<FuncView>(() =>
+   138→   138→    seedSrc ? { ...seedSrc.view } : { cx: 0, cy: 0, scale: 440 / 13 }
+   139→   139→  )
+   140→   140→  const inputRef = useRef<HTMLInputElement>(null)
+   141→   141→  const canvasRef = useRef<HTMLCanvasElement>(null)
+   142→   142→  const rafRef = useRef(0)
+   143→   143→  const dragRef = useRef<{ x: number; y: number } | null>(null)
+   144→   144→  const resizeRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
+   145→   145→  const appliedRef = useRef(expr)
+   146→   146→  const dirtyRef = useRef(false)
+   147→   147→  const exprRef = useRef(expr)
+   148→   148→  useEffect(() => {
+   149→   149→    exprRef.current = expr
+   150→   150→  })
+   151→   151→
+   152→   152→  const fns = useMemo(() => compileAll(expr), [expr])
+   153→   153→  const firstError = fns.find((f) => f.error)?.error ?? null
+   154→   154→  const hasAnything = splitExprs(expr).length > 0
+   155→   155→
+   156→   156→  // focus the expression input on open ("курсор переключается в окошко")
+   157→   157→  useEffect(() => {
+   158→   158→    const t = setTimeout(() => inputRef.current?.focus(), 30)
+   159→   159→    return () => clearTimeout(t)
+   160→   160→  }, [])
+   161→   161→
+   162→   162→  /** (text mode) write expression back into the element text (debounced) */
+   163→   163→  useEffect(() => {
+   164→   164→    if (isStamp) return
+   165→   165→    if (expr === appliedRef.current) return
+   166→   166→    const t = setTimeout(() => {
+   167→   167→      appliedRef.current = expr
+   168→   168→      dirtyRef.current = false
+   169→   169→      onWriteText?.(expr)
+   170→   170→    }, 400)
+   171→   171→    return () => clearTimeout(t)
+   172→   172→  }, [expr, isStamp, onWriteText])
+   173→   173→
+   174→   174→  /** (text mode) final write on close/unmount (expr via ref — the closure would be stale) */
+   175→   175→  useEffect(() => {
+   176→   176→    if (isStamp) return
+   177→   177→    return () => {
+   178→   178→      if (dirtyRef.current) {
+   179→   179→        dirtyRef.current = false
+   180→   180→        onWriteText?.(exprRef.current)
+   181→   181→      }
+   182→   182→    }
+   183→   183→  }, [isStamp, onWriteText])
+   184→   184→
+   185→   185→  const markDirty = useCallback(() => {
+   186→   186→    dirtyRef.current = true
+   187→   187→  }, [])
+   188→   188→
+   189→   189→  // ---- graph drawing -------------------------------------------------------
+   190→   190→  const draw = useCallback(() => {
+   191→   191→    const canvas = canvasRef.current
+   192→   192→    if (!canvas) return
+   193→   193→    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+   194→   194→    const { w, h } = size
+   195→   195→    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+   196→   196→      canvas.width = Math.round(w * dpr)
+   197→   197→      canvas.height = Math.round(h * dpr)
+   198→   198→    }
+   199→   199→    const ctx = canvas.getContext('2d')
+   200→   200→    if (!ctx) return
+   201→   201→    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+   202→   202→    ctx.clearRect(0, 0, w, h)
+   203→   203→
+   204→   204→    const { cx, cy, scale } = view
+   205→   205→    const worldLeft = cx - w / 2 / scale
+   206→   206→    const worldRight = cx + w / 2 / scale
+   207→   207→    const worldTop = cy + h / 2 / scale
+   208→   208→    const worldBottom = cy - h / 2 / scale
+   209→   209→    const X = (wx: number) => (wx - cx) * scale + w / 2
+   210→   210→    const Y = (wy: number) => h / 2 - (wy - cy) * scale
+   211→   211→
+   212→   212→    // grid
+   213→   213→    const step = niceStep(scale)
+   214→   214→    ctx.lineWidth = 1
+   215→   215→    ctx.strokeStyle = '#f4f4f5'
+   216→   216→    ctx.beginPath()
+   217→   217→    for (let gx = Math.ceil(worldLeft / step) * step; gx <= worldRight; gx += step) {
+   218→   218→      const px = Math.round(X(gx)) + 0.5
+   219→   219→      ctx.moveTo(px, 0)
+   220→   220→      ctx.lineTo(px, h)
+   221→   221→    }
+   222→   222→    for (let gy = Math.ceil(worldBottom / step) * step; gy <= worldTop; gy += step) {
+   223→   223→      const py = Math.round(Y(gy)) + 0.5
+   224→   224→      ctx.moveTo(0, py)
+   225→   225→      ctx.lineTo(w, py)
+   226→   226→    }
+   227→   227→    ctx.stroke()
+   228→   228→
+   229→   229→    // axes
+   230→   230→    ctx.strokeStyle = '#a1a1aa'
+   231→   231→    ctx.beginPath()
+   232→   232→    if (Y(0) >= 0 && Y(0) <= h) {
+   233→   233→      ctx.moveTo(0, Math.round(Y(0)) + 0.5)
+   234→   234→      ctx.lineTo(w, Math.round(Y(0)) + 0.5)
+   235→   235→    }
+   236→   236→    if (X(0) >= 0 && X(0) <= w) {
+   237→   237→      ctx.moveTo(Math.round(X(0)) + 0.5, 0)
+   238→   238→      ctx.lineTo(Math.round(X(0)) + 0.5, h)
+   239→   239→    }
+   240→   240→    ctx.stroke()
+   241→   241→
+   242→   242→    // tick labels
+   243→   243→    ctx.fillStyle = '#71717a'
+   244→   244→    ctx.font = '10px ui-sans-serif, system-ui, sans-serif'
+   245→   245→    const xAxisY = Math.max(12, Math.min(h - 5, Y(0) + 12))
+   246→   246→    for (let gx = Math.ceil(worldLeft / step) * step; gx <= worldRight; gx += step) {
+   247→   247→      if (Math.abs(gx) < step / 2) continue
+   248→   248→      ctx.fillText(fmtTick(gx, step), X(gx) + 2, xAxisY)
+   249→   249→    }
+   250→   250→    const yAxisX = Math.max(3, Math.min(w - 34, X(0) + 4))
+   251→   251→    for (let gy = Math.ceil(worldBottom / step) * step; gy <= worldTop; gy += step) {
+   252→   252→      if (Math.abs(gy) < step / 2) continue
+   253→   253→      ctx.fillText(fmtTick(gy, step), yAxisX, Y(gy) - 3)
+   254→   254→    }
+   255→   255→
+   256→   256→    // curves
+   257→   257→    const valid = fns.filter((f) => !f.error && f.raw)
+   258→   258→    const explicit = valid.filter((f) => !f.usesY)
+   259→   259→    const implicit = valid.filter((f) => f.usesY)
+   260→   260→
+   261→   261→    let N = Math.round(Math.min(Math.max(w, 240), 700))
+   262→   262→    if (explicit.length > 1) N = Math.min(N, Math.max(300, Math.floor(3600 / explicit.length)))
+   263→   263→    const breakWorld = (h / scale) * 6
+   264→   264→
+   265→   265→    for (let k = 0; k < explicit.length; k++) {
+   266→   266→      const f = explicit[k]
+   267→   267→      ctx.beginPath()
+   268→   268→      ctx.strokeStyle = COLORS[k % COLORS.length]
+   269→   269→      ctx.lineWidth = 2
+   270→   270→      ctx.lineJoin = 'round'
+   271→   271→      let prevY: number | null = null
+   272→   272→      for (let i = 0; i <= N; i++) {
+   273→   273→        const wx = worldLeft + ((worldRight - worldLeft) * i) / N
+   274→   274→        const y = f.f(wx, 0)
+   275→   275→        if (!isFinite(y) || Math.abs(y) > 1e9) {
+   276→   276→          prevY = null
+   277→   277→          continue
+   278→   278→        }
+   279→   279→        const sy = Y(y)
+   280→   280→        const jump = prevY !== null && Math.abs(y - prevY) > breakWorld
+   281→   281→        const signFlip = prevY !== null && prevY * y < 0 && Math.abs(y - prevY) > (h / scale) * 1.5
+   282→   282→        if (prevY === null || jump || signFlip) ctx.moveTo(X(wx), sy)
+   283→   283→        else ctx.lineTo(X(wx), sy)
+   284→   284→        prevY = y
+   285→   285→      }
+   286→   286→      ctx.stroke()
+   287→   287→    }
+   288→   288→
+   289→   289→    // implicit curves (equations with y) via marching squares
+   290→   290→    for (let k = 0; k < implicit.length; k++) {
+   291→   291→      const f = implicit[k]
+   292→   292→      ctx.beginPath()
+   293→   293→      ctx.strokeStyle = COLORS[(explicit.length + k) % COLORS.length]
+   294→   294→      ctx.lineWidth = 2
+   295→   295→      const gw = 120
+   296→   296→      const gh = Math.max(40, Math.round((120 * h) / w))
+   297→   297→      const dx = (worldRight - worldLeft) / gw
+   298→   298→      const dy = (worldTop - worldBottom) / gh
+   299→   299→      const vals = new Float64Array((gw + 1) * (gh + 1))
+   300→   300→      for (let j = 0; j <= gh; j++) {
+   301→   301→        const wy = worldBottom + j * dy
+   302→   302→        for (let i = 0; i <= gw; i++) {
+   303→   303→          const v = f.f(worldLeft + i * dx, wy)
+   304→   304→          vals[j * (gw + 1) + i] = isFinite(v) && Math.abs(v) < 1e12 ? v : NaN
+   305→   305→        }
+   306→   306→      }
+   307→   307→      for (let j = 0; j < gh; j++) {
+   308→   308→        for (let i = 0; i < gw; i++) {
+   309→   309→          const v00 = vals[j * (gw + 1) + i]
+   310→   310→          const v10 = vals[j * (gw + 1) + i + 1]
+   311→   311→          const v11 = vals[(j + 1) * (gw + 1) + i + 1]
+   312→   312→          const v01 = vals[(j + 1) * (gw + 1) + i]
+   313→   313→          if (isNaN(v00) || isNaN(v10) || isNaN(v11) || isNaN(v01)) continue
+   314→   314→          let cs = 0
+   315→   315→          if (v00 > 0) cs |= 1
+   316→   316→          if (v10 > 0) cs |= 2
+   317→   317→          if (v11 > 0) cs |= 4
+   318→   318→          if (v01 > 0) cs |= 8
+   319→   319→          const segs = CASE_SEGS[cs]
+   320→   320→          if (segs.length === 0) continue
+   321→   321→          const bx = worldLeft + i * dx
+   322→   322→          const by = worldBottom + j * dy
+   323→   323→          const pts: Array<[number, number]> = [
+   324→   324→            [bx + dx * (v00 / (v00 - v10)), by],
+   325→   325→            [bx + dx, by + dy * (v10 / (v10 - v11))],
+   326→   326→            [bx + dx * (v01 / (v01 - v11)), by + dy],
+   327→   327→            [bx, by + dy * (v00 / (v00 - v01))],
+   328→   328→          ]
+   329→   329→          for (const [a, b] of segs) {
+   330→   330→            ctx.moveTo(X(pts[a][0]), Y(pts[a][1]))
+   331→   331→            ctx.lineTo(X(pts[b][0]), Y(pts[b][1]))
+   332→   332→          }
+   333→   333→        }
+   334→   334→      }
+   335→   335→      ctx.stroke()
+   336→   336→    }
+   337→   337→  }, [fns, size, view])
+   338→   338→
+   339→   339→  // rAF-throttled redraw
+   340→   340→  useEffect(() => {
+   341→   341→    cancelAnimationFrame(rafRef.current)
+   342→   342→    rafRef.current = requestAnimationFrame(draw)
+   343→   343→    return () => cancelAnimationFrame(rafRef.current)
+   344→   344→  }, [draw])
+   345→   345→
+   346→   346→  // ---- interactions --------------------------------------------------------
+   347→   347→  // wheel zoom around cursor (non-passive to preventDefault)
+   348→   348→  useEffect(() => {
+   349→   349→    const canvas = canvasRef.current
+   350→   350→    if (!canvas) return
+   351→   351→    const onWheel = (e: WheelEvent) => {
+   352→   352→      e.preventDefault()
+   353→   353→      const rect = canvas.getBoundingClientRect()
+   354→   354→      const mx = e.clientX - rect.left
+   355→   355→      const my = e.clientY - rect.top
+   356→   356→      const factor = Math.exp(-e.deltaY * 0.0015)
+   357→   357→      setView((v) => {
+   358→   358→        const ns = Math.max(2, Math.min(5000, v.scale * factor))
+   359→   359→        const wx = v.cx + (mx - size.w / 2) / v.scale
+   360→   360→        const wy = v.cy + (size.h / 2 - my) / v.scale
+   361→   361→        return { scale: ns, cx: wx - (mx - size.w / 2) / ns, cy: wy - (size.h / 2 - my) / ns }
+   362→   362→      })
+   363→   363→    }
+   364→   364→    canvas.addEventListener('wheel', onWheel, { passive: false })
+   365→   365→    return () => canvas.removeEventListener('wheel', onWheel)
+   366→   366→  }, [size])
+   367→   367→
+   368→   368→  const zoomBy = (factor: number) =>
+   369→   369→    setView((v) => ({ ...v, scale: Math.max(2, Math.min(5000, v.scale * factor)) }))
+   370→   370→
+   371→   371→  const resetView = () => setView({ cx: 0, cy: 0, scale: size.w / 13 })
+   372→   372→
+   373→   373→  const onCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   374→   374→    e.preventDefault()
+   375→   375→    try {
+   376→   376→      ;(e.target as HTMLCanvasElement).setPointerCapture(e.pointerId)
+   377→   377→    } catch {
+   378→   378→      // pointer may already be released (or synthetic) — the drag still works
+   379→   379→    }
+   380→   380→    dragRef.current = { x: e.clientX, y: e.clientY }
+   381→   381→  }
+   382→   382→  const onCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   383→   383→    const last = dragRef.current
+   384→   384→    if (!last) return
+   385→   385→    const dx = e.clientX - last.x
+   386→   386→    const dy = e.clientY - last.y
+   387→   387→    dragRef.current = { x: e.clientX, y: e.clientY }
+   388→   388→    setView((v) => ({ ...v, cx: v.cx - dx / v.scale, cy: v.cy + dy / v.scale }))
+   389→   389→  }
+   390→   390→  const onCanvasPointerUp = () => {
+   391→   391→    dragRef.current = null
+   392→   392→  }
+   393→   393→
+   394→   394→  const onResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+   395→   395→    e.preventDefault()
+   396→   396→    e.stopPropagation()
+   397→   397→    try {
+   398→   398→      ;(e.target as HTMLDivElement).setPointerCapture(e.pointerId)
+   399→   399→    } catch {
+   400→   400→      // pointer may already be released (or synthetic) — the resize still works
+   401→   401→    }
+   402→   402→    resizeRef.current = { x: e.clientX, y: e.clientY, w: size.w, h: size.h }
+   403→   403→  }
+   404→   404→  const onResizePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+   405→   405→    const st = resizeRef.current
+   406→   406→    if (!st) return
+   407→   407→    const maxW = Math.min(920, window.innerWidth - 28)
+   408→   408→    const maxH = Math.min(640, window.innerHeight - 150)
+   409→   409→    setSize({
+   410→   410→      w: Math.max(260, Math.min(maxW, st.w + (e.clientX - st.x))),
+   411→   411→      h: Math.max(180, Math.min(maxH, st.h + (e.clientY - st.y))),
+   412→   412→    })
+   413→   413→  }
+   414→   414→  const onResizePointerUp = () => {
+   415→   415→    resizeRef.current = null
+   416→   416→  }
+   417→   417→
+   418→   418→  // ---- keypad actions (event handlers — ref access is fine here) -----------
+   419→   419→  const insert = (str: string, caretBack = 0) => {
+   420→   420→    markDirty()
+   421→   421→    const input = inputRef.current
+   422→   422→    if (!input) {
+   423→   423→      setExpr((e) => e + str)
+   424→   424→      return
+   425→   425→    }
+   426→   426→    const s = input.selectionStart ?? input.value.length
+   427→   427→    const eEnd = input.selectionEnd ?? s
+   428→   428→    const next = input.value.slice(0, s) + str + input.value.slice(eEnd)
+   429→   429→    setExpr(next)
+   430→   430→    requestAnimationFrame(() => {
+   431→   431→      input.focus()
+   432→   432→      const pos = s + str.length - caretBack
+   433→   433→      input.setSelectionRange(pos, pos)
+   434→   434→    })
+   435→   435→  }
+   436→   436→
+   437→   437→  const backspace = () => {
+   438→   438→    markDirty()
+   439→   439→    const input = inputRef.current
+   440→   440→    if (!input) {
+   441→   441→      setExpr((e) => e.slice(0, -1))
+   442→   442→      return
+   443→   443→    }
+   444→   444→    const s = input.selectionStart ?? input.value.length
+   445→   445→    const eEnd = input.selectionEnd ?? s
+   446→   446→    if (s !== eEnd) {
+   447→   447→      const next = input.value.slice(0, s) + input.value.slice(eEnd)
+   448→   448→      setExpr(next)
+   449→   449→      requestAnimationFrame(() => {
+   450→   450→        input.focus()
+   451→   451→        input.setSelectionRange(s, s)
+   452→   452→      })
+   453→   453→    } else if (s > 0) {
+   454→   454→      const next = input.value.slice(0, s - 1) + input.value.slice(s)
+   455→   455→      setExpr(next)
+   456→   456→      requestAnimationFrame(() => {
+   457→   457→        input.focus()
+   458→   458→        input.setSelectionRange(s - 1, s - 1)
+   459→   459→      })
+   460→   460→    }
+   461→   461→  }
+   462→   462→
+   463→   463→  // ---- panel position ------------------------------------------------------
+   464→   464→  const panelW = size.w + 28
+   465→   465→  const narrow = viewport.w < 640
+   466→   466→  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+   467→   467→  // text mode: panel to the right of the text anchor; stamp mode: cover the stamp
+   468→   468→  const left = narrow
+   469→   469→    ? clamp((viewport.w - panelW) / 2, 8, Math.max(8, viewport.w - panelW - 10))
+   470→   470→    : clamp(initial ? anchor.sx - 13 : anchor.sx + 22, 8, Math.max(8, viewport.w - panelW - 10))
+   471→   471→  const top = narrow
+   472→   472→    ? 72
+   473→   473→    : clamp(initial ? anchor.sy - 96 : anchor.sy - 10, 60, Math.max(60, viewport.h - 200))
+   474→   474→
+   475→   475→  // ---- stamp API: fresh closure every render (reads left/top/size/view) ----
+   476→   476→  useEffect(() => {
+   477→   477→    if (!stampApiRef) return
+   478→   478→    stampApiRef.current = {
+   479→   479→      getStamp: () => {
+   480→   480→        const canvas = canvasRef.current
+   481→   481→        if (!canvas) return null
+   482→   482→        let img: string | null = null
+   483→   483→        try {
+   484→   484→          img = snapshotWithFrame(canvas)
+   485→   485→        } catch {
+   486→   486→          img = null
+   487→   487→        }
+   488→   488→        // canvas offset inside the panel -> panel position is known in viewport coords
+   489→   489→        const panel = containerRef.current
+   490→   490→        const rect = canvas.getBoundingClientRect()
+   491→   491→        let dx = 13
+   492→   492→        let dy = 100
+   493→   493→        if (panel) {
+   494→   494→          const pr = panel.getBoundingClientRect()
+   495→   495→          dx = rect.left - pr.left
+   496→   496→          dy = rect.top - pr.top
+   497→   497→        }
+   498→   498→        return {
+   499→   499→          expr,
+   500→   500→          view: { ...view },
+   501→   501→          sx: left + dx,
+   502→   502→          sy: top + dy,
+   503→   503→          w: size.w,
+   504→   504→          h: size.h,
+   505→   505→          img,
+   506→   506→          valid: fns.some((f) => !f.error && f.raw),
+   507→   507→        }
+   508→   508→      },
+   509→   509→    }
+   510→   510→    return () => {
+   511→   511→      stampApiRef.current = null
+   512→   512→    }
+   513→   513→  })
+   514→   514→
+   515→   515→  return (
+   516→   516→    <div
+   517→   517→      ref={containerRef}
+   518→   518→      role="dialog"
+   519→   519→      aria-label={isStamp ? 'Редактирование графика' : 'Редактор функции'}
+   520→   520→      data-testid="func-editor"
+   521→   521→      className="pointer-events-auto absolute flex flex-col rounded-xl border border-zinc-200 bg-white shadow-2xl"
+   522→   522→      style={{ left, top, width: panelW, maxHeight: Math.max(240, viewport.h - top - 16) }}
+   523→   523→      onKeyDown={(e) => {
+   524→   524→        if (e.key === 'Escape') {
+   525→   525→          e.preventDefault()
+   526→   526→          e.stopPropagation()
+   527→   527→          onClose()
+   528→   528→        }
+   529→   529→        e.stopPropagation()
+   530→   530→      }}
+   531→   531→    >
+   532→   532→      {/* header */}
+   533→   533→      <div className="flex items-center justify-between rounded-t-xl border-b border-zinc-100 bg-zinc-50/80 px-3 py-2">
+   534→   534→        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-700">
+   535→   535→          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-zinc-800 font-serif italic text-white">ƒ</span>
+   536→   536→          {isStamp ? 'Редактирование графика' : 'График функции'}
+   537→   537→        </div>
+   538→   538→        <div className="flex items-center gap-0.5">
+   539→   539→          <button type="button" aria-label="Отдалить график" onClick={() => zoomBy(1 / 1.3)} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   540→   540→            <Minus className="h-3.5 w-3.5" />
+   541→   541→          </button>
+   542→   542→          <button type="button" aria-label="Приблизить график" onClick={() => zoomBy(1.3)} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   543→   543→            <Plus className="h-3.5 w-3.5" />
+   544→   544→          </button>
+   545→   545→          <button type="button" aria-label="Сбросить вид графика" onClick={resetView} className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   546→   546→            <RotateCcw className="h-3.5 w-3.5" />
+   547→   547→          </button>
+   548→   548→          <button type="button" aria-label="Закрыть редактор функции" data-testid="func-close" onClick={onClose} className="ml-1 flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-200/70">
+   549→   549→            <X className="h-4 w-4" />
+   550→   550→          </button>
+   551→   551→        </div>
+   552→   552→      </div>
+   553→   553→
+   554→   554→      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-3 pt-2">
+   555→   555→        {/* expression input */}
+   556→   556→        <input
+   557→   557→          ref={inputRef}
+   558→   558→          data-testid="func-input"
+   559→   559→          value={expr}
+   560→   560→          onChange={(e) => {
+   561→   561→            markDirty()
+   562→   562→            setExpr(e.target.value)
+   563→   563→          }}
+   564→   564→          onKeyDown={(e) => e.stopPropagation()}
+   565→   565→          placeholder="sin(x); x^2 + 3x"
+   566→   566→          autoComplete="off"
+   567→   567→          spellCheck={false}
+   568→   568→          aria-label="Выражение функции"
+   569→   569→          className="w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 font-mono text-sm text-zinc-800 outline-none placeholder:text-zinc-400 focus:border-zinc-500"
+   570→   570→        />
+   571→   571→        {firstError ? (
+   572→   572→          <p data-testid="func-error" className="mt-1 text-xs font-medium text-rose-600">
+   573→   573→            {firstError}
+   574→   574→          </p>
+   575→   575→        ) : null}
+   576→   576→
+   577→   577→        {/* graph */}
+   578→   578→        <div className="relative mt-2 overflow-hidden rounded-lg border border-zinc-200" style={{ width: size.w, height: size.h }}>
+   579→   579→          <canvas
+   580→   580→            ref={canvasRef}
+   581→   581→            data-testid="func-canvas"
+   582→   582→            width={size.w}
+   583→   583→            height={size.h}
+   584→   584→            className="block cursor-grab touch-none"
+   585→   585→            style={{ width: size.w, height: size.h }}
+   586→   586→            onPointerDown={onCanvasPointerDown}
+   587→   587→            onPointerMove={onCanvasPointerMove}
+   588→   588→            onPointerUp={onCanvasPointerUp}
+   589→   589→            onPointerCancel={onCanvasPointerUp}
+   590→   590→            aria-label="График функции"
+   591→   591→          />
+   592→   592→          {!hasAnything ? (
+   593→   593→            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+   594→   594→              <p className="rounded-lg bg-white/85 px-3 py-1.5 text-xs text-zinc-500">Введите функцию — график появится здесь</p>
+   595→   595→            </div>
+   596→   596→          ) : null}
+   597→   597→          {/* resize handle */}
+   598→   598→          <div
+   599→   599→            data-testid="func-resize"
+   600→   600→            onPointerDown={onResizePointerDown}
+   601→   601→            onPointerMove={onResizePointerMove}
+   602→   602→            onPointerUp={onResizePointerUp}
+   603→   603→            onPointerCancel={onResizePointerUp}
+   604→   604→            role="separator"
+   605→   605→            aria-label="Изменить размер графика"
+   606→   606→            className="absolute bottom-0 right-0 flex h-5 w-5 cursor-nwse-resize touch-none items-end justify-end rounded-tl-md bg-gradient-to-br from-transparent to-zinc-300"
+   607→   607→            style={{ borderBottomRightRadius: 7 }}
+   608→   608→          >
+   609→   609→            <svg viewBox="0 0 8 8" className="h-2 w-2 text-zinc-500">
+   610→   610→              <path d="M7 1 L1 7 M7 4 L4 7" stroke="currentColor" strokeWidth="1.2" fill="none" />
+   611→   611→            </svg>
+   612→   612→          </div>
+   613→   613→        </div>
+   614→   614→
+   615→   615→        {/* legend */}
+   616→   616→        {fns.length > 0 ? (
+   617→   617→          <div className="mt-1.5 flex flex-wrap gap-1.5" data-testid="func-legend">
+   618→   618→            {fns.map((f, i) =>
+   619→   619→              f.error ? null : (
+   620→   620→                <span key={i} className="flex max-w-full items-center gap-1 rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] text-zinc-600">
+   621→   621→                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: COLORS[colorIndexFor(fns, i) % COLORS.length] }} />
+   622→   622→                  <span className="truncate font-mono">{f.raw.length > 26 ? `${f.raw.slice(0, 26)}…` : f.raw}</span>
+   623→   623→                </span>
+   624→   624→              )
+   625→   625→            )}
+   626→   626→          </div>
+   627→   627→        ) : null}
+   628→   628→
+   629→   629→        {/* keypad */}
+   630→   630→        <div className="mt-2 grid grid-cols-6 gap-1">
+   631→   631→          {KEYPAD.map((k) => (
+   632→   632→            <button
+   633→   633→              key={k.label}
+   634→   634→              type="button"
+   635→   635→              data-testid={k.testId}
+   636→   636→              onMouseDown={(e) => e.preventDefault()}
+   637→   637→              onClick={() => (k.del ? backspace() : insert(k.ins ?? '', k.back ?? 0))}
+   638→   638→              className="flex h-8 items-center justify-center rounded-md border border-zinc-200 bg-white text-xs font-medium text-zinc-700 hover:bg-zinc-100 active:bg-zinc-200"
+   639→   639→            >
+   640→   640→              {k.label}
+   641→   641→            </button>
+   642→   642→          ))}
+   643→   643→        </div>
+   644→   644→      </div>
+   645→   645→    </div>
+   646→   646→  )
+   647→   647→}
+   648→   648→
+   649→   649→/** legend color index matching the draw order: explicit curves first, then implicit */
+   650→   650→function colorIndexFor(fns: Array<{ usesY: boolean; error: string | null }>, i: number): number {
+   651→   651→  let explicitBefore = 0
+   652→   652→  let implicitBefore = 0
+   653→   653→  for (let k = 0; k < i; k++) {
+   654→   654→    if (fns[k].error) continue
+   655→   655→    if (fns[k].usesY) implicitBefore++
+   656→   656→    else explicitBefore++
+   657→   657→  }
+   658→   658→  return fns[i].usesY ? explicitBefore + implicitBefore : explicitBefore
+   659→   659→}
+   660→   660→
+   661→   661→/** math keypad: insertion strings + optional caret shift back (for "fn()" inserts) */
+   662→   662→const KEYPAD: Array<{ label: string; ins?: string; back?: number; del?: boolean; testId?: string }> = [
+   663→   663→  { label: 'x', ins: 'x', testId: 'func-key-x' },
+   664→   664→  { label: 'y', ins: 'y', testId: 'func-key-y' },
+   665→   665→  { label: 'π', ins: 'pi', testId: 'func-key-pi' },
+   666→   666→  { label: 'x²', ins: '^2', testId: 'func-key-sq' },
+   667→   667→  { label: 'xⁿ', ins: '^', testId: 'func-key-pow' },
+   668→   668→  { label: '√', ins: 'sqrt()', back: 1, testId: 'func-key-sqrt' },
+   669→   669→  { label: '7', ins: '7' },
+   670→   670→  { label: '8', ins: '8' },
+   671→   671→  { label: '9', ins: '9' },
+   672→   672→  { label: '÷', ins: '/' },
+   673→   673→  { label: '×', ins: '*' },
+   674→   674→  { label: '−', ins: '-' },
+   675→   675→  { label: '4', ins: '4' },
+   676→   676→  { label: '5', ins: '5' },
+   677→   677→  { label: '6', ins: '6' },
+   678→   678→  { label: '+', ins: '+' },
+   679→   679→  { label: '(', ins: '(' },
+   680→   680→  { label: ')', ins: ')' },
+   681→   681→  { label: '1', ins: '1' },
+   682→   682→  { label: '2', ins: '2' },
+   683→   683→  { label: '3', ins: '3' },
+   684→   684→  { label: '0', ins: '0' },
+   685→   685→  { label: '.', ins: '.' },
+   686→   686→  { label: ';', ins: '; ', testId: 'func-key-sep' },
+   687→   687→  { label: 'sin', ins: 'sin()', back: 1, testId: 'func-key-sin' },
+   688→   688→  { label: 'cos', ins: 'cos()', back: 1 },
+   689→   689→  { label: 'tan', ins: 'tan()', back: 1 },
+   690→   690→  { label: 'ln', ins: 'ln()', back: 1 },
+   691→   691→  { label: 'log', ins: 'log()', back: 1 },
+   692→   692→  { label: '⌫', del: true, testId: 'func-key-back' },
+   693→   693→]
+   694→   694→
