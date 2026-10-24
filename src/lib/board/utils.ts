@@ -1,4 +1,5 @@
-import type { BoardElement, Rect, TextElement, PathElement } from './types'
+import type { BoardElement, Rect, TextElement, PathElement, Solid3Element } from './types'
+import { solid3Bounds, pickSolid } from './solid3'
 
 const ID_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'
 
@@ -155,6 +156,13 @@ export function elementBounds(el: BoardElement): Rect {
       const y2 = el.y + el.h
       return { x: Math.min(el.x, x2), y: Math.min(el.y, y2), w: Math.abs(el.w), h: Math.abs(el.h) }
     }
+    case 'line': {
+      const x2 = el.x + el.w
+      const y2 = el.y + el.h
+      return { x: Math.min(el.x, x2), y: Math.min(el.y, y2), w: Math.abs(el.w), h: Math.abs(el.h) }
+    }
+    case 'solid3':
+      return solid3Bounds(el)
     default:
       return { x: el.x, y: el.y, w: el.w, h: el.h }
   }
@@ -214,6 +222,13 @@ export function hitElement(el: BoardElement, wx: number, wy: number, tol: number
     case 'arrow': {
       return distToSegment(wx, wy, el.x, el.y, el.x + el.w, el.y + el.h) <= el.strokeWidth / 2 + tol
     }
+    case 'line': {
+      return distToSegment(wx, wy, el.x, el.y, el.x + el.w, el.y + el.h) <= el.strokeWidth / 2 + tol
+    }
+    case 'solid3': {
+      // near an edge, on a vertex or inside a face — the solid is one element
+      return pickSolid(el as Solid3Element, wx, wy, tol) !== null
+    }
     case 'text': {
       const r = expandRect(textBounds(el), tol)
       return wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h
@@ -235,6 +250,11 @@ export function moveElement<T extends BoardElement>(el: T, dx: number, dy: numbe
       points[i + 1] += dy
     }
     return { ...el, points }
+  }
+  if (el.type === 'solid3') {
+    // translate every vertex in the board plane; depth z stays
+    const vertices = el.vertices.map((v) => ({ ...v, x: v.x + dx, y: v.y + dy }))
+    return { ...el, vertices }
   }
   return { ...el, x: el.x + dx, y: el.y + dy }
 }

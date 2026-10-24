@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import {
   MousePointer2,
   Pencil,
+  PenLine,
   Highlighter,
   Eraser,
   StickyNote,
@@ -11,6 +12,7 @@ import {
   Square,
   Circle,
   ArrowUpRight,
+  Box,
   Image as ImageIcon,
   Loader2,
   Undo2,
@@ -19,7 +21,7 @@ import {
 import { useBoardStore } from '@/lib/board/store'
 import { PEN_COLORS, STICKY_COLORS, STROKE_WIDTHS } from '@/lib/board/utils'
 import { processImageFile, placeImagesOnBoard } from '@/lib/board/images'
-import type { Tool } from '@/lib/board/types'
+import type { Solid3Kind, Tool } from '@/lib/board/types'
 import { useToast } from '@/hooks/use-toast'
 import {
   Popover,
@@ -36,8 +38,17 @@ const TOOLS: { tool: Tool; icon: typeof Pencil; label: string; key: string }[] =
   { tool: 'sticky', icon: StickyNote, label: 'Стикер', key: 'S' },
   { tool: 'text', icon: Type, label: 'Текст', key: 'T' },
   { tool: 'rect', icon: Square, label: 'Прямоугольник', key: 'R' },
+  { tool: 'solid3', icon: Box, label: '3D-фигура', key: 'G' },
   { tool: 'ellipse', icon: Circle, label: 'Круг', key: 'O' },
   { tool: 'arrow', icon: ArrowUpRight, label: 'Стрелка', key: 'A' },
+  { tool: 'line', icon: PenLine, label: 'Линия', key: 'L' },
+]
+
+const SOLID3_SHAPES: { kind: Solid3Kind; label: string }[] = [
+  { kind: 'cube', label: 'Куб' },
+  { kind: 'box', label: 'Параллелепипед' },
+  { kind: 'prism', label: 'Призма' },
+  { kind: 'pyramid', label: 'Пирамида' },
 ]
 
 export default function Toolbar() {
@@ -45,10 +56,14 @@ export default function Toolbar() {
   const color = useBoardStore((s) => s.color)
   const stickyColor = useBoardStore((s) => s.stickyColor)
   const width = useBoardStore((s) => s.width)
+  const dashed = useBoardStore((s) => s.dashed)
+  const solid3Shape = useBoardStore((s) => s.solid3Shape)
   const setTool = useBoardStore((s) => s.setTool)
   const setColor = useBoardStore((s) => s.setColor)
   const setStickyColor = useBoardStore((s) => s.setStickyColor)
   const setWidth = useBoardStore((s) => s.setWidth)
+  const setDashed = useBoardStore((s) => s.setDashed)
+  const setSolid3Shape = useBoardStore((s) => s.setSolid3Shape)
   const undo = useBoardStore((s) => s.undo)
   const redo = useBoardStore((s) => s.redo)
   const undoCount = useBoardStore((s) => s.undoStack.length)
@@ -88,10 +103,36 @@ export default function Toolbar() {
   const activeColor = isSticky ? stickyColor : color
   const pickColor = (c: string) => (isSticky ? setStickyColor(c) : setColor(c))
   const showPalette = tool !== 'select' && tool !== 'eraser'
-  const showWidth = tool === 'pen' || tool === 'marker' || tool === 'rect' || tool === 'ellipse' || tool === 'arrow'
+  const showWidth = tool === 'pen' || tool === 'marker' || tool === 'rect' || tool === 'ellipse' || tool === 'arrow' || tool === 'line' || tool === 'solid3'
+  const showDash = tool === 'line'
 
   return (
     <TooltipProvider delayDuration={400}>
+      {tool === 'solid3' && (
+        <div
+          className="pointer-events-auto absolute left-1/2 z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-xl border border-zinc-200/80 bg-white/95 p-1 shadow-lg backdrop-blur"
+          style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 78px)' }}
+          role="radiogroup"
+          aria-label="Форма 3D-фигуры"
+          data-testid="solid3-picker"
+        >
+          {SOLID3_SHAPES.map((sh) => (
+            <button
+              key={sh.kind}
+              type="button"
+              role="radio"
+              aria-checked={solid3Shape === sh.kind}
+              data-testid={`solid3-shape-${sh.kind}`}
+              onClick={() => setSolid3Shape(sh.kind)}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                solid3Shape === sh.kind ? 'bg-zinc-900 text-white' : 'text-zinc-600 hover:bg-zinc-100'
+              }`}
+            >
+              {sh.label}
+            </button>
+          ))}
+        </div>
+      )}
       <div
         className="pointer-events-auto absolute left-1/2 z-30 flex max-w-[calc(100vw-136px)] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-2xl border border-zinc-200/80 bg-white/95 p-1.5 shadow-xl backdrop-blur scrollbar-none sm:max-w-[calc(100vw-24px)]"
         style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 14px)' }}
@@ -235,6 +276,30 @@ export default function Toolbar() {
               </div>
             </PopoverContent>
           </Popover>
+        )}
+
+        {showDash && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Штриховая линия"
+                aria-pressed={dashed}
+                data-testid="toolbar-dash"
+                onClick={() => setDashed(!dashed)}
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors ${
+                  dashed ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-600 hover:bg-zinc-100 active:bg-zinc-200'
+                }`}
+              >
+                <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round">
+                  <line x1="3" y1="12" x2="8.5" y2="12" />
+                  <line x1="12.5" y1="12" x2="15.5" y2="12" />
+                  <line x1="19.5" y1="12" x2="21" y2="12" />
+                </svg>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Штрихи (невидимые линии)</TooltipContent>
+          </Tooltip>
         )}
 
         <div className="mx-0.5 h-6 w-px shrink-0 bg-zinc-200" aria-hidden />

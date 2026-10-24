@@ -4,10 +4,11 @@ import { useEffect, useRef } from 'react'
 import { useBoardStore, remoteDrafts, net } from '@/lib/board/store'
 import { renderBoard } from '@/lib/board/render'
 import { elementBounds, hitElement, moveElement, uid, normRect } from '@/lib/board/utils'
+import { addSolidEdge, createSolid, moveSolidVertex, pickSolid, projX, projY, solid3Geom, splitSolidEdge } from '@/lib/board/solid3'
 import { toWire } from '@/lib/board/wire'
-import type { BoardElement, Camera, LocalDraft } from '@/lib/board/types'
+import type { BoardElement, Camera, LocalDraft, Solid3Element, SolidPick } from '@/lib/board/types'
 
-type Mode = 'none' | 'active' | 'draw' | 'shape' | 'erase' | 'move' | 'pan' | 'pinch' | 'marquee'
+type Mode = 'none' | 'active' | 'draw' | 'shape' | 'erase' | 'move' | 'pan' | 'pinch' | 'marquee' | 'vertex' | 'edgeDraw'
 
 interface PointerInfo {
   id: number
@@ -40,6 +41,10 @@ export default function BoardCanvas() {
   const pinch = useRef({ dist: 0, zoom0: 1, worldX: 0, worldY: 0 })
   const moveCtx = useRef<{ ids: string[]; before: BoardElement[]; lastX: number; lastY: number; moved: boolean } | null>(null)
   const lastTap = useRef({ time: 0, x: 0, y: 0, id: '' })
+
+  // 3D solid part-editing: dragging a single vertex / drawing a new edge with RMB
+  const vertexCtx = useRef<{ id: string; vi: number; before: Solid3Element; moved: boolean } | null>(null)
+  const edgeDrawCtx = useRef<{ id: string; from: number; before: Solid3Element; target: number | null } | null>(null)
 
   const lastCursorEmit = useRef(0)
   const lastProgressEmit = useRef(0)
@@ -160,6 +165,20 @@ export default function BoardCanvas() {
     return null
   }
 
+  /** topmost 3D solid whose vertex/edge/fill is under the pointer (part precision) */
+  function pickSolidTopmost(wx: number, wy: number): { el: Solid3Element; pick: SolidPick } | null {
+    const s = useBoardStore.getState()
+    const els = Array.from(s.elements.values())
+    const tol = 8 / s.camera.zoom
+    for (let i = els.length - 1; i >= 0; i--) {
+      const el = els[i]
+      if (el.type !== 'solid3') continue
+      const pick = pickSolid(el as Solid3Element, wx, wy, tol)
+      if (pick) return { el: el as Solid3Element, pick }
+    }
+    return null
+  }
+
   function eraseAt(wx: number, wy: number) {
     const s = useBoardStore.getState()
     const r = 14 / s.camera.zoom
@@ -230,6 +249,18 @@ export default function BoardCanvas() {
       } else if (mode.current === 'move' && moveCtx.current) {
         commitMove()
         moveCtx.current = null
+      } else if (mode.current === 'vertex' && vertexCtx.current) {
+        // finish the vertex drag exactly like a pointerup would
+        const vc = vertexCtx.current
+        vertexCtx.current = null
+        const el = s.elements.get(vc.id)
+        if (vc.moved && el) {
+          s.broadcastUpdate([el])
+          s.pushOp({ kind: 'update', before: vc.before, after: el })
+        }
+      } else if (mode.current === 'edgeDraw') {
+        edgeDrawCtx.current = null
+        localDraft.current = null
       }
       mode.current = 'pinch'
       activePointer.current = null
@@ -254,7 +285,26 @@ export default function BoardCanvas() {
     mode.current = 'active'
     activePointer.current = e.pointerId
 
-    // right/middle mouse button -> pan the board from any tool (keeps selection)
+    // RMB on a vertex of a 3D solid -> start drawing an edge from it;
+    // otherwise right/middle mouse button pans the board from any tool
+    if (e.pointerType === 'mouse' && e.button === 2) {
+      const solidHit = pickSolidTopmost(p.x, p.y)
+      if (solidHit && solidHit.pick.kind === 'vertex') {
+        mode.current = 'edgeDraw'
+        edgeDrawCtx.current = { id: solidHit.el.id, from: solidHit.pick.vi, before: solidHit.el, target: null }
+        const v = solidHit.el.vertices[solidHit.pick.vi]
+        localDraft.current = {
+          kind: 'edgeDraw',
+          x1: projX(v),
+          y1: projY(v),
+          x2: p.x,
+          y2: p.y,
+          color: solidHit.el.color,
+          snapped: false,
+        }
+        return
+      }
+    }
     if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) {
       mode.current = 'pan'
       panStart.current = { camX: s.camera.x, camY: s.camera.y, sx: p.sx, sy: p.sy }
@@ -263,16 +313,52 @@ export default function BoardCanvas() {
 
     const tool = s.tool
 
-    if (tool === 'select') {
-      const hit = hitTopmost(p.x, p.y)
-      if (hit) {
+    if (tool === 'select' || tool === 'solid3') {
+      // 3D solids get part-precise handling first: vertex drag / edge double-tap
+      // (works in both the select tool and the 3D tool itself)
+      const solidHit = pickSolidTopmost(p.x, p.y)
+      if (solidHit && solidHit.pick.kind === 'vertex') {
+        s.select(solidHit.el.id)
+        vertexCtx.current = { id: solidHit.el.id, vi: solidHit.pick.vi, before: solidHit.el, moved: false }
+        mode.current = 'vertex'
+        return
+      }
+      if (solidHit && solidHit.pick.kind === 'edge') {
+        const now = Date.now()
+        const tapId = `${solidHit.el.id}:e${solidHit.pick.ei}`
+        const isDoubleTap =
+          now - lastTap.current.time < 350 &&
+          Math.hypot(p.sx - lastTap.current.x, p.sy - lastTap.current.y) < 24 &&
+          lastTap.current.id === tapId
+        lastTap.current = { time: now, x: p.sx, y: p.sy, id: tapId }
+        if (isDoubleTap) {
+          // double-click on an edge -> insert a draggable point in its middle
+          const { el: updated } = splitSolidEdge(solidHit.el, solidHit.pick.ei)
+          s.updateLocal([updated])
+          s.broadcastUpdate([updated])
+          s.pushOp({ kind: 'update', before: solidHit.el, after: updated })
+          s.select(solidHit.el.id)
+          mode.current = 'none'
+          activePointer.current = null
+          return
+        }
+        // single click on an edge -> falls through to the normal move flow
+      }
+
+      if (tool === 'select' || solidHit) {
+        const hit = tool === 'select' ? hitTopmost(p.x, p.y) : solidHit!.el
+        if (hit) {
         // tap on already-selected sticky/text -> edit (only when it is the sole selection)
         const now = Date.now()
         const isDoubleTap =
           now - lastTap.current.time < 350 &&
           Math.hypot(p.sx - lastTap.current.x, p.sy - lastTap.current.y) < 24 &&
           lastTap.current.id === hit.id
-        lastTap.current = { time: now, x: p.sx, y: p.sy, id: hit.id }
+        // solids keep the edge-tap record from the branch above (double-click
+        // on an edge inserts a point) — do not clobber it with the plain id
+        if (hit.type !== 'solid3') {
+          lastTap.current = { time: now, x: p.sx, y: p.sy, id: hit.id }
+        }
         if (
           (hit.type === 'sticky' || hit.type === 'text' || hit.type === 'func') &&
           (isDoubleTap || (s.selectedIds.length === 1 && s.selectedIds[0] === hit.id))
@@ -308,16 +394,31 @@ export default function BoardCanvas() {
           moved: false,
         }
         mode.current = 'move'
-      } else if (e.pointerType === 'mouse') {
-        // left drag on empty space -> rubber-band multi-select
-        s.select(null)
-        s.setMarquee({ x0: p.sx, y0: p.sy, x1: p.sx, y1: p.sy })
-        mode.current = 'marquee'
-      } else {
-        s.select(null)
-        mode.current = 'pan'
-        panStart.current = { camX: s.camera.x, camY: s.camera.y, sx: p.sx, sy: p.sy }
+        } else if (e.pointerType === 'mouse') {
+          // left drag on empty space -> rubber-band multi-select
+          s.select(null)
+          s.setMarquee({ x0: p.sx, y0: p.sy, x1: p.sx, y1: p.sy })
+          mode.current = 'marquee'
+        } else {
+          s.select(null)
+          mode.current = 'pan'
+          panStart.current = { camX: s.camera.x, camY: s.camera.y, sx: p.sx, sy: p.sy }
+        }
+        return
       }
+
+      // 3D tool on empty space -> stamp a new solid
+      localDraft.current = {
+        kind: 'solid3',
+        shape: s.solid3Shape,
+        x0: p.x,
+        y0: p.y,
+        x1: p.x,
+        y1: p.y,
+        color: s.color,
+        width: s.width,
+      }
+      mode.current = 'shape'
       return
     }
 
@@ -343,7 +444,7 @@ export default function BoardCanvas() {
       return
     }
 
-    if (tool === 'rect' || tool === 'ellipse' || tool === 'arrow') {
+    if (tool === 'rect' || tool === 'ellipse' || tool === 'arrow' || tool === 'line') {
       localDraft.current = {
         kind: 'shape',
         tool,
@@ -353,6 +454,7 @@ export default function BoardCanvas() {
         y1: p.y,
         color: s.color,
         width: s.width,
+        dashed: tool === 'line' ? s.dashed : undefined,
       }
       mode.current = 'shape'
       return
@@ -503,6 +605,49 @@ export default function BoardCanvas() {
       return
     }
 
+    if (mode.current === 'vertex' && vertexCtx.current) {
+      const vc = vertexCtx.current
+      const el = s.elements.get(vc.id)
+      if (el?.type === 'solid3') {
+        const updated = moveSolidVertex(el as Solid3Element, vc.vi, p.x, p.y)
+        vc.moved = true
+        s.updateLocal([updated])
+        if (now - lastUpdateEmit.current > 60 && net.bus?.enabled) {
+          lastUpdateEmit.current = now
+          net.bus.send({ event: 'element:update', element: toWire(updated) })
+        }
+      }
+      return
+    }
+
+    if (mode.current === 'edgeDraw' && edgeDrawCtx.current) {
+      const ec = edgeDrawCtx.current
+      const el = s.elements.get(ec.id)
+      if (el?.type === 'solid3' && localDraft.current?.kind === 'edgeDraw') {
+        const sol = el as Solid3Element
+        // snap the free end to a nearby vertex of the same solid
+        let tx = p.x
+        let ty = p.y
+        let snapped = false
+        let target: number | null = null
+        const g = solid3Geom(sol)
+        const snapTol = 14 / s.camera.zoom
+        for (let i = 0; i < g.pv.length; i++) {
+          if (i === ec.from) continue
+          if (Math.hypot(g.pv[i].x - p.x, g.pv[i].y - p.y) <= snapTol) {
+            tx = g.pv[i].x
+            ty = g.pv[i].y
+            snapped = true
+            target = i
+            break
+          }
+        }
+        ec.target = target
+        localDraft.current = { ...localDraft.current, x2: tx, y2: ty, snapped }
+      }
+      return
+    }
+
     if (mode.current === 'pan') {
       s.setCamera({
         ...s.camera,
@@ -588,6 +733,12 @@ export default function BoardCanvas() {
             y0 = draft.y0
             x1 = draft.x0 + 70
             y1 = draft.y0
+          } else if (draft.tool === 'line') {
+            // horizontal segment through the tap point
+            x0 = draft.x0 - 70
+            y0 = draft.y0
+            x1 = draft.x0 + 70
+            y1 = draft.y0
           } else {
             x0 = draft.x0 - 70
             y0 = draft.y0 - 45
@@ -610,6 +761,20 @@ export default function BoardCanvas() {
               strokeWidth: draft.width,
             },
           ])
+        } else if (draft.tool === 'line') {
+          s.addElements([
+            {
+              id: uid(),
+              type: 'line',
+              x: x0,
+              y: y0,
+              w: x1 - x0,
+              h: y1 - y0,
+              color: draft.color,
+              strokeWidth: draft.width,
+              dashed: draft.dashed === true,
+            },
+          ])
         } else {
           const r = normRect(x0, y0, x1, y1)
           s.addElements([
@@ -625,8 +790,41 @@ export default function BoardCanvas() {
             },
           ])
         }
+      } else if (draft && draft.kind === 'solid3') {
+        let { x0, y0, x1, y1 } = draft
+        if (Math.hypot(x1 - x0, y1 - y0) < 10 / s.camera.zoom) {
+          // tap -> default-size cube
+          x0 = draft.x0 - 110
+          y0 = draft.y0 - 80
+          x1 = draft.x0 + 110
+          y1 = draft.y0 + 80
+        }
+        const el = createSolid(uid(), draft.shape, x0, y0, x1, y1, draft.color, draft.width)
+        s.addElements([el])
+        s.select(el.id)
       }
       localDraft.current = null
+    } else if (mode.current === 'vertex' && vertexCtx.current) {
+      const vc = vertexCtx.current
+      vertexCtx.current = null
+      const el = s.elements.get(vc.id)
+      if (vc.moved && el) {
+        s.broadcastUpdate([el])
+        s.pushOp({ kind: 'update', before: vc.before, after: el })
+      }
+    } else if (mode.current === 'edgeDraw' && edgeDrawCtx.current) {
+      const ec = edgeDrawCtx.current
+      edgeDrawCtx.current = null
+      localDraft.current = null
+      const el = s.elements.get(ec.id)
+      if (el?.type === 'solid3' && ec.target !== null) {
+        const updated = addSolidEdge(el as Solid3Element, ec.from, ec.target)
+        if (updated) {
+          s.updateLocal([updated])
+          s.broadcastUpdate([updated])
+          s.pushOp({ kind: 'update', before: ec.before, after: updated })
+        }
+      }
     } else if (mode.current === 'erase') {
       const removed = deletedDuringErase.current
       deletedDuringErase.current = []
@@ -676,6 +874,10 @@ export default function BoardCanvas() {
     if (e.pointerId === activePointer.current && (mode.current === 'draw' || mode.current === 'shape')) {
       localDraft.current = null
       draftElementId.current = null
+    }
+    if (e.pointerId === activePointer.current && mode.current === 'edgeDraw') {
+      edgeDrawCtx.current = null
+      localDraft.current = null
     }
     finalizePointer(e)
   }

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { BoardElement, Camera, ConnectionStatus, Tool, UserData } from './types'
+import type { BoardElement, Camera, ConnectionStatus, Solid3Kind, Tool, UserData } from './types'
 import { toWire, type WireElement } from './wire'
 import type { RealtimeBus, RTEvent } from './realtime'
 
@@ -117,6 +117,10 @@ interface BoardStore {
   color: string
   stickyColor: string
   width: number
+  /** line tool: draw new lines dashed ("штрихи", hidden-edge style) */
+  dashed: boolean
+  /** solid3 tool: shape to stamp on drag */
+  solid3Shape: Solid3Kind
   /** multi-selection (empty = nothing selected) */
   selectedIds: string[]
   /** rubber-band selection rect in screen coords while dragging (transient) */
@@ -141,6 +145,8 @@ interface BoardStore {
   setColor: (color: string) => void
   setStickyColor: (color: string) => void
   setWidth: (width: number) => void
+  setDashed: (dashed: boolean) => void
+  setSolid3Shape: (shape: Solid3Kind) => void
   select: (id: string | null) => void
   /** replace the whole multi-selection */
   selectMany: (ids: string[]) => void
@@ -208,6 +214,8 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   color: '#1e293b',
   stickyColor: '#fff176',
   width: 4,
+  dashed: false,
+  solid3Shape: 'cube',
   selectedIds: [],
   marquee: null,
   editingId: null,
@@ -236,6 +244,8 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
   setColor: (color) => set({ color }),
   setStickyColor: (stickyColor) => set({ stickyColor }),
   setWidth: (width) => set({ width }),
+  setDashed: (dashed) => set({ dashed }),
+  setSolid3Shape: (solid3Shape) => set({ solid3Shape }),
   select: (id) => set({ selectedIds: id ? [id] : [] }),
   selectMany: (ids) => set({ selectedIds: ids }),
   setMarquee: (marquee) => set({ marquee }),

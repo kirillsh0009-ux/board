@@ -8,6 +8,7 @@ import { renderToCanvas, loadRasterImages } from '@/lib/board/render'
 import { processImageFile, placeImagesOnBoard, type ProcessedImage } from '@/lib/board/images'
 import type { BoardElement, UserData } from '@/lib/board/types'
 import { RealtimeBus, type RTEvent } from '@/lib/board/realtime'
+import { solid3Geom, edgeDashed } from '@/lib/board/solid3'
 import BoardCanvas from './BoardCanvas'
 import TopBar from './TopBar'
 import Toolbar from './Toolbar'
@@ -90,6 +91,10 @@ export default function BoardView({ boardId }: { boardId: string }) {
     net.boardId = boardId
     // debug handle for E2E diagnostics
     ;(window as unknown as { __board?: unknown }).__board = useBoardStore
+    ;(window as unknown as { __solid3?: unknown }).__solid3 = {
+      solid3Geom,
+      edgeDashed,
+    }
   }, [boardId])
 
   const fitToContent = useCallback(
@@ -276,8 +281,10 @@ export default function BoardView({ boardId }: { boardId: string }) {
           s: 'sticky',
           t: 'text',
           r: 'rect',
+          g: 'solid3',
           o: 'ellipse',
           a: 'arrow',
+          l: 'line',
         }
         const tool = map[e.key.toLowerCase()]
         if (tool) s.setTool(tool as never)

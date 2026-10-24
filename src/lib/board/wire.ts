@@ -65,6 +65,38 @@ export function fromWire(raw: WireElement | Partial<BoardElement>): BoardElement
       if (rest.img.length > 3_500_000) return null
       break
     }
+    case 'line': {
+      if (!(num(rest.x) && num(rest.y) && num(rest.w) && num(rest.h))) return null
+      if (typeof rest.color !== 'string' || !num(rest.strokeWidth)) return null
+      rest.dashed = rest.dashed === true
+      break
+    }
+    case 'solid3': {
+      if (rest.shape !== 'cube' && rest.shape !== 'box' && rest.shape !== 'prism' && rest.shape !== 'pyramid') return null
+      const vs = rest.vertices as unknown
+      if (!Array.isArray(vs) || vs.length < 4 || vs.length > 200) return null
+      for (const v of vs as Array<Record<string, unknown>>) {
+        if (!(v && num(v.x) && num(v.y) && num(v.z))) return null
+      }
+      const es = rest.edges as unknown
+      if (!Array.isArray(es) || es.length < 6 || es.length > 400) return null
+      for (const e of es as Array<Record<string, unknown>>) {
+        if (!e || !Number.isInteger(e.a) || !Number.isInteger(e.b)) return null
+        if ((e.a as number) === (e.b as number)) return null
+        if ((e.a as number) < 0 || (e.b as number) < 0) return null
+        if ((e.a as number) >= vs.length || (e.b as number) >= vs.length) return null
+      }
+      const fs = rest.faces as unknown
+      if (!Array.isArray(fs) || fs.length < 4 || fs.length > 60) return null
+      for (const f of fs as unknown[]) {
+        if (!Array.isArray(f) || f.length < 3) return null
+        for (const i of f) {
+          if (!Number.isInteger(i) || (i as number) < 0 || (i as number) >= vs.length) return null
+        }
+      }
+      if (typeof rest.color !== 'string' || !num(rest.strokeWidth)) return null
+      break
+    }
     default:
       return null
   }

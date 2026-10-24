@@ -1,5 +1,6 @@
-import type { BoardElement, Camera, DraftStroke, FuncElement, ImageElement, LocalDraft, ShapeElement } from './types'
+import type { BoardElement, Camera, DraftStroke, FuncElement, ImageElement, LineElement, LocalDraft, ShapeElement, Solid3Element } from './types'
 import { TEXT_FONT, TEXT_MAX_WIDTH, STICKY_FONT, wrapLines } from './utils'
+import { createSolid, edgeDashed, solid3Geom } from './solid3'
 
 function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   const rr = Math.max(0, Math.min(r, Math.min(Math.abs(w), Math.abs(h)) / 2))
@@ -94,6 +95,16 @@ function drawShape(ctx: CanvasRenderingContext2D, el: ShapeElement) {
     ctx.stroke()
     return
   }
+  if (el.type === 'line') {
+    const line = el as unknown as LineElement
+    ctx.setLineDash(line.dashed ? [line.strokeWidth * 1.8 + 2, line.strokeWidth * 1.2 + 2] : [])
+    ctx.beginPath()
+    ctx.moveTo(line.x, line.y)
+    ctx.lineTo(line.x + line.w, line.y + line.h)
+    ctx.stroke()
+    ctx.setLineDash([])
+    return
+  }
   // arrow: keep the drag direction — (x,y) is the start (press point),
   // (w,h) are signed deltas so the tip always follows the cursor
   const x2 = el.x + el.w
@@ -139,6 +150,39 @@ function drawText(ctx: CanvasRenderingContext2D, el: { x: number; y: number; siz
   for (let i = 0; i < lines.length; i++) {
     if (lines[i]) ctx.fillText(lines[i], el.x, el.y + i * lineHeight)
   }
+}
+
+function drawSolid3(ctx: CanvasRenderingContext2D, el: Solid3Element) {
+  const geom = solid3Geom(el)
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.strokeStyle = el.color
+  ctx.lineWidth = el.strokeWidth
+  const solid = new Path2D()
+  const dashed = new Path2D()
+  for (let i = 0; i < el.edges.length; i++) {
+    const e = el.edges[i]
+    const pa = geom.pv[e.a]
+    const pb = geom.pv[e.b]
+    if (!pa || !pb) continue
+    const path = edgeDashed(geom, el, i) ? dashed : solid
+    path.moveTo(pa.x, pa.y)
+    path.lineTo(pb.x, pb.y)
+  }
+  ctx.setLineDash([])
+  ctx.stroke(solid)
+  ctx.setLineDash([el.strokeWidth * 1.8 + 2, el.strokeWidth * 1.2 + 2])
+  ctx.stroke(dashed)
+  ctx.setLineDash([])
+  // vertex dots — draggable points of the wireframe
+  ctx.fillStyle = el.color
+  const r = Math.max(el.strokeWidth * 0.7, 2)
+  ctx.beginPath()
+  for (const p of geom.pv) {
+    ctx.moveTo(p.x + r, p.y)
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
+  }
+  ctx.fill()
 }
 
 /** decoded image cache for func stamps + photo elements (keyed by element id, re-created when img changes) */
@@ -244,6 +288,12 @@ export function drawElement(ctx: CanvasRenderingContext2D, el: BoardElement | { 
     case 'arrow':
       drawShape(ctx, el as ShapeElement)
       break
+    case 'line':
+      drawShape(ctx, el as unknown as ShapeElement)
+      break
+    case 'solid3':
+      drawSolid3(ctx, el as Solid3Element)
+      break
     case 'sticky':
       drawSticky(ctx, el)
       break
@@ -337,18 +387,38 @@ export function renderBoard(
       drawPath(ctx, { points: ld.points, color: ld.color, width: ld.width, marker: ld.marker })
     } else if (ld.kind === 'shape') {
       const isArrow = ld.tool === 'arrow'
+      const isLine = ld.tool === 'line'
       drawShape(ctx, {
         id: 'draft',
-        type: ld.tool,
-        // arrow keeps the drag direction: start = press point, end = cursor;
+        type: isLine ? 'line' : ld.tool,
+        // arrow/line keep the drag direction: start = press point, end = cursor;
         // rect/ellipse stay normalized to a top-left anchored box
-        x: isArrow ? ld.x0 : Math.min(ld.x0, ld.x1),
-        y: isArrow ? ld.y0 : Math.min(ld.y0, ld.y1),
-        w: isArrow ? ld.x1 - ld.x0 : Math.abs(ld.x1 - ld.x0),
-        h: isArrow ? ld.y1 - ld.y0 : Math.abs(ld.y1 - ld.y0),
+        x: isArrow || isLine ? ld.x0 : Math.min(ld.x0, ld.x1),
+        y: isArrow || isLine ? ld.y0 : Math.min(ld.y0, ld.y1),
+        w: isArrow || isLine ? ld.x1 - ld.x0 : Math.abs(ld.x1 - ld.x0),
+        h: isArrow || isLine ? ld.y1 - ld.y0 : Math.abs(ld.y1 - ld.y0),
         color: ld.color,
         strokeWidth: ld.width,
-      })
+        dashed: ld.dashed === true,
+      } as unknown as ShapeElement)
+    } else if (ld.kind === 'solid3') {
+      drawSolid3(ctx, createSolid('draft', ld.shape, ld.x0, ld.y0, ld.x1, ld.y1, ld.color, ld.width))
+    } else if (ld.kind === 'edgeDraw') {
+      // RMB edge being drawn between two vertices of a solid
+      ctx.save()
+      ctx.strokeStyle = ld.color
+      ctx.lineWidth = 2
+      ctx.setLineDash([6, 5])
+      ctx.beginPath()
+      ctx.moveTo(ld.x1, ld.y1)
+      ctx.lineTo(ld.x2, ld.y2)
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.fillStyle = ld.color
+      ctx.beginPath()
+      ctx.arc(ld.x2, ld.y2, ld.snapped ? 5 : 3.5, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
     } else if (ld.kind === 'erase') {
       ctx.save()
       ctx.strokeStyle = '#a1a1aa'

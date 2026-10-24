@@ -8,8 +8,10 @@ export type Tool =
   | 'rect'
   | 'ellipse'
   | 'arrow'
+  | 'line'
+  | 'solid3'
 
-export type ElementType = 'path' | 'rect' | 'ellipse' | 'arrow' | 'sticky' | 'text' | 'func' | 'image'
+export type ElementType = 'path' | 'rect' | 'ellipse' | 'arrow' | 'line' | 'solid3' | 'sticky' | 'text' | 'func' | 'image'
 
 export interface UserData {
   id: string
@@ -42,6 +44,20 @@ export interface ShapeElement {
   h: number
   color: string
   strokeWidth: number
+}
+
+/** straight segment, drawn with the line tool; (w, h) are signed deltas */
+export interface LineElement {
+  id: string
+  type: 'line'
+  x: number
+  y: number
+  w: number
+  h: number
+  color: string
+  strokeWidth: number
+  /** "штрихи" — hidden-edge style from geometry drawings */
+  dashed: boolean
 }
 
 export interface StickyElement {
@@ -90,7 +106,49 @@ export interface FuncElement {
   srcId?: string
 }
 
-export type BoardElement = PathElement | ShapeElement | StickyElement | TextElement | FuncElement | ImageElement
+export type BoardElement =
+  | PathElement
+  | ShapeElement
+  | LineElement
+  | Solid3Element
+  | StickyElement
+  | TextElement
+  | FuncElement
+  | ImageElement
+
+export type Solid3Kind = 'cube' | 'box' | 'prism' | 'pyramid'
+
+export interface Solid3Vertex {
+  /** board-plane position (world) */
+  x: number
+  y: number
+  /** depth; the oblique projection shifts it up-right on screen */
+  z: number
+}
+
+export interface Solid3Edge {
+  /** vertex indices */
+  a: number
+  b: number
+}
+
+/**
+ * 3D wireframe solid (cube / box / prism / pyramid and any user-deformed
+ * variant). Hidden edges are NOT stored — they are derived at render time
+ * from the face topology + projection (see lib/board/solid3.ts), so the
+ * drawing "understands" visibility by itself as vertices are dragged.
+ */
+export interface Solid3Element {
+  id: string
+  type: 'solid3'
+  shape: Solid3Kind
+  vertices: Solid3Vertex[]
+  edges: Solid3Edge[]
+  /** face topology as vertex-index loops (visibility math) */
+  faces: number[][]
+  color: string
+  strokeWidth: number
+}
 
 /**
  * Uploaded photo / pasted image. `img` is a dataURL (downscaled + re-encoded
@@ -125,7 +183,9 @@ export interface DraftStroke {
 
 export type LocalDraft =
   | { kind: 'path'; points: number[]; color: string; width: number; marker: boolean }
-  | { kind: 'shape'; tool: 'rect' | 'ellipse' | 'arrow'; x0: number; y0: number; x1: number; y1: number; color: string; width: number }
+  | { kind: 'shape'; tool: 'rect' | 'ellipse' | 'arrow' | 'line'; x0: number; y0: number; x1: number; y1: number; color: string; width: number; dashed?: boolean }
+  | { kind: 'solid3'; shape: Solid3Kind; x0: number; y0: number; x1: number; y1: number; color: string; width: number }
+  | { kind: 'edgeDraw'; x1: number; y1: number; x2: number; y2: number; color: string; snapped: boolean }
   | { kind: 'erase'; x: number; y: number; r: number }
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline'
