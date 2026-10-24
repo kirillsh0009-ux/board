@@ -85,6 +85,8 @@ export function fromWire(raw: WireElement | Partial<BoardElement>): BoardElement
         if ((e.a as number) === (e.b as number)) return null
         if ((e.a as number) < 0 || (e.b as number) < 0) return null
         if ((e.a as number) >= vs.length || (e.b as number) >= vs.length) return null
+        // manual dash/solid override: keep undefined (auto) or a strict boolean
+        if (e.dash !== undefined) e.dash = e.dash === true
       }
       const fs = rest.faces as unknown
       if (!Array.isArray(fs) || fs.length < 4 || fs.length > 60) return null

@@ -165,7 +165,8 @@ function drawSolid3(ctx: CanvasRenderingContext2D, el: Solid3Element) {
     const pa = geom.pv[e.a]
     const pb = geom.pv[e.b]
     if (!pa || !pb) continue
-    const path = edgeDashed(geom, el, i) ? dashed : solid
+    // manual per-edge override (tap on the edge) wins over hidden-line math
+    const path = (e.dash ?? edgeDashed(geom, el, i)) ? dashed : solid
     path.moveTo(pa.x, pa.y)
     path.lineTo(pb.x, pb.y)
   }

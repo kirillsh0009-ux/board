@@ -70,3 +70,4 @@ package-lock.json.bak
 /Caddyfile
 /bun.lock
 .vercel
+tool-results/

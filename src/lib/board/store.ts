@@ -165,6 +165,8 @@ interface BoardStore {
   clearAll: () => void
 
   pushOp: (op: Op) => void
+  /** remove the most recent op (a gesture retracted it, e.g. double-click reverting the first tap's dash flip) */
+  popOp: () => void
   undo: () => void
   redo: () => void
 
@@ -307,6 +309,8 @@ export const useBoardStore = create<BoardStore>((set, get) => ({
       undoStack: [...s.undoStack.slice(-MAX_OPS), op],
       redoStack: [],
     })),
+
+  popOp: () => set((s) => ({ undoStack: s.undoStack.slice(0, -1) })),
 
   undo: () => {
     const s = get()

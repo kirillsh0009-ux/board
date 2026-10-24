@@ -130,6 +130,11 @@ export interface Solid3Edge {
   /** vertex indices */
   a: number
   b: number
+  /**
+   * Manual style override set by tapping the edge: true = dashed,
+   * false = solid. Undefined = automatic (hidden-line detection).
+   */
+  dash?: boolean
 }
 
 /**

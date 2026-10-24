@@ -4,7 +4,7 @@ import { useEffect, useRef } from 'react'
 import { useBoardStore, remoteDrafts, net } from '@/lib/board/store'
 import { renderBoard } from '@/lib/board/render'
 import { elementBounds, hitElement, moveElement, uid, normRect } from '@/lib/board/utils'
-import { addSolidEdge, createSolid, moveSolidVertex, pickSolid, projX, projY, solid3Geom, splitSolidEdge } from '@/lib/board/solid3'
+import { addSolidEdge, createSolid, moveSolidVertex, pickSolid, projX, projY, solid3Geom, splitSolidEdge, toggleSolidEdgeDash } from '@/lib/board/solid3'
 import { toWire } from '@/lib/board/wire'
 import type { BoardElement, Camera, LocalDraft, Solid3Element, SolidPick } from '@/lib/board/types'
 
@@ -45,6 +45,10 @@ export default function BoardCanvas() {
   // 3D solid part-editing: dragging a single vertex / drawing a new edge with RMB
   const vertexCtx = useRef<{ id: string; vi: number; before: Solid3Element; moved: boolean } | null>(null)
   const edgeDrawCtx = useRef<{ id: string; from: number; before: Solid3Element; target: number | null } | null>(null)
+  // press started on an edge: a plain click (no drag) flips dashed <-> solid
+  const edgeTapCtx = useRef<{ id: string; ei: number } | null>(null)
+  // the flip performed by the first tap of a double-click (reverted on the 2nd tap)
+  const dashToggleCtx = useRef<{ id: string; ei: number; before: Solid3Element } | null>(null)
 
   const lastCursorEmit = useRef(0)
   const lastProgressEmit = useRef(0)
@@ -201,7 +205,27 @@ export default function BoardCanvas() {
   /** finish a multi-move: broadcast final positions + one undo op for the whole drag */
   function commitMove() {
     const m = moveCtx.current
-    if (!m || !m.moved) return
+    if (!m || !m.moved) {
+      // plain click without a drag: if it landed on a 3D solid edge, flip that
+      // edge's rendered style dashed <-> solid (manual override, one undo op)
+      const tap = edgeTapCtx.current
+      edgeTapCtx.current = null
+      if (m && !m.moved && tap && m.ids.includes(tap.id)) {
+        const st = useBoardStore.getState()
+        const el = st.elements.get(tap.id)
+        if (el?.type === 'solid3') {
+          const updated = toggleSolidEdgeDash(el as Solid3Element, tap.ei)
+          if (updated) {
+            st.updateLocal([updated])
+            st.broadcastUpdate([updated])
+            st.pushOp({ kind: 'update', before: el, after: updated })
+            // remembered so the 2nd tap of a double-click reverts this flip
+            dashToggleCtx.current = { id: tap.id, ei: tap.ei, before: el as Solid3Element }
+          }
+        }
+      }
+      return
+    }
     const st = useBoardStore.getState()
     const pairs: Array<{ before: BoardElement; after: BoardElement }> = []
     for (let i = 0; i < m.ids.length; i++) {
@@ -332,17 +356,33 @@ export default function BoardCanvas() {
           lastTap.current.id === tapId
         lastTap.current = { time: now, x: p.sx, y: p.sy, id: tapId }
         if (isDoubleTap) {
-          // double-click on an edge -> insert a draggable point in its middle
-          const { el: updated } = splitSolidEdge(solidHit.el, solidHit.pick.ei)
+          // double-click on an edge -> insert a draggable point exactly where
+          // clicked; the dash flip made by the first tap of this double-click
+          // is reverted so the whole gesture is one clean undoable step
+          const pending = dashToggleCtx.current
+          dashToggleCtx.current = null
+          let base = solidHit.el
+          if (pending && pending.id === solidHit.el.id && pending.ei === solidHit.pick.ei) {
+            const st2 = useBoardStore.getState()
+            const top = st2.undoStack[st2.undoStack.length - 1]
+            // the top op must be exactly the flip we are about to retract
+            if (top && top.kind === 'update' && top.before === pending.before) {
+              st2.popOp()
+              base = pending.before
+            }
+          }
+          const { el: updated } = splitSolidEdge(base, solidHit.pick.ei, p.x, p.y)
           s.updateLocal([updated])
           s.broadcastUpdate([updated])
-          s.pushOp({ kind: 'update', before: solidHit.el, after: updated })
+          s.pushOp({ kind: 'update', before: base, after: updated })
           s.select(solidHit.el.id)
           mode.current = 'none'
           activePointer.current = null
           return
         }
-        // single click on an edge -> falls through to the normal move flow
+        // single press on an edge: dragging still moves the solid, but a plain
+        // click (no drag) flips the edge style dashed <-> solid (see commitMove)
+        edgeTapCtx.current = { id: solidHit.el.id, ei: solidHit.pick.ei }
       }
 
       if (tool === 'select' || solidHit) {

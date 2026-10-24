@@ -241,13 +241,38 @@ export function moveSolidVertex(el: Solid3Element, vi: number, sx: number, sy: n
   return { ...el, vertices }
 }
 
-/** double-click on an edge: insert a draggable point in its middle */
-export function splitSolidEdge(el: Solid3Element, ei: number): { el: Solid3Element; index: number } {
+/**
+ * double-click on an edge: insert a draggable point at the clicked position
+ * (projected onto the edge, clamped away from the endpoints); without click
+ * coords the point lands in the middle.
+ */
+export function splitSolidEdge(
+  el: Solid3Element,
+  ei: number,
+  wx?: number,
+  wy?: number
+): { el: Solid3Element; index: number } {
   const e = el.edges[ei]
   if (!e) return { el, index: -1 }
   const a = el.vertices[e.a]
   const b = el.vertices[e.b]
-  const m: Solid3Vertex = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 }
+  let t = 0.5
+  if (wx !== undefined && wy !== undefined) {
+    const ax = projX(a)
+    const ay = projY(a)
+    const dx = projX(b) - ax
+    const dy = projY(b) - ay
+    const len2 = dx * dx + dy * dy
+    if (len2 > 0) {
+      t = ((wx - ax) * dx + (wy - ay) * dy) / len2
+      t = Math.max(0.08, Math.min(0.92, t))
+    }
+  }
+  const m: Solid3Vertex = {
+    x: a.x + (b.x - a.x) * t,
+    y: a.y + (b.y - a.y) * t,
+    z: a.z + (b.z - a.z) * t,
+  }
   const vertices = [...el.vertices, m]
   const mi = vertices.length - 1
   const edges = el.edges.slice()
@@ -275,6 +300,21 @@ export function addSolidEdge(el: Solid3Element, a: number, b: number): Solid3Ele
   if (a === b || a < 0 || b < 0 || a >= el.vertices.length || b >= el.vertices.length) return null
   if (el.edges.some((e) => (e.a === a && e.b === b) || (e.a === b && e.b === a))) return null
   return { ...el, edges: [...el.edges, { a, b }] }
+}
+
+/**
+ * Tap on an edge: flip its rendered style dashed <-> solid. The override is
+ * stored on the edge, so afterwards the edge keeps the chosen style even when
+ * moving vertices re-computes hidden-line visibility for the rest.
+ */
+export function toggleSolidEdgeDash(el: Solid3Element, ei: number): Solid3Element | null {
+  const e = el.edges[ei]
+  if (!e) return null
+  const computed = edgeDashed(solid3Geom(el), el, ei)
+  const effective = e.dash ?? computed
+  const edges = el.edges.slice()
+  edges[ei] = { a: e.a, b: e.b, dash: !effective }
+  return { ...el, edges }
 }
 
 /** move the whole solid (element move) */
