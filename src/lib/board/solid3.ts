@@ -213,21 +213,22 @@ export function createSolid(
     )
     F.push([0, 1, 2], [3, 4, 5], [0, 1, 4, 3], [0, 2, 5, 3], [1, 2, 5, 4])
   } else {
-    // pyramid: square base on the ground plane, apex above its center
+    // pyramid: triangular base on the ground plane (front edge AB, rear vertex
+    // C pushed back by D), apex S above the base centroid — the classic
+    // textbook drawing of a triangular pyramid
     const D = 0.5 * Math.min(w, h)
-    const H = Math.max(h - (PROJ_KY * D) / 2, h * 0.3)
+    const H = Math.max(h - (PROJ_KY * D) / 3, h * 0.3)
     V.push(
       { x, y: y + h, z: 0 },
       { x: x + w, y: y + h, z: 0 },
-      { x: x + w, y: y + h, z: D },
-      { x, y: y + h, z: D },
-      { x: x + w / 2, y: y + h - H, z: D / 2 }
+      { x: x + w / 2, y: y + h, z: D },
+      { x: x + w / 2, y: y + h - H, z: D / 3 }
     )
     E.push(
-      { a: 0, b: 1 }, { a: 1, b: 2 }, { a: 2, b: 3 }, { a: 3, b: 0 },
-      { a: 0, b: 4 }, { a: 1, b: 4 }, { a: 2, b: 4 }, { a: 3, b: 4 }
+      { a: 0, b: 1 }, { a: 1, b: 2 }, { a: 2, b: 0 },
+      { a: 0, b: 3 }, { a: 1, b: 3 }, { a: 2, b: 3 }
     )
-    F.push([0, 1, 2, 3], [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4])
+    F.push([0, 1, 2], [0, 1, 3], [1, 2, 3], [2, 0, 3])
   }
   return { id, type: 'solid3', shape: kind, vertices: V, edges: E, faces: F, color, strokeWidth }
 }
