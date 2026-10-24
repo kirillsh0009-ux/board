@@ -699,7 +699,9 @@ export default function BoardCanvas() {
 
     if (mode.current === 'shape') {
       const draft = localDraft.current
-      if (draft && draft.kind === 'shape') {
+      // both 'shape' and 'solid3' drafts track the drag end (x1, y1); without
+      // this the solid rect stays zero-length and every drag reads as a tap
+      if (draft && (draft.kind === 'shape' || draft.kind === 'solid3')) {
         draft.x1 = p.x
         draft.y1 = p.y
       }
@@ -763,85 +765,67 @@ export default function BoardCanvas() {
     } else if (mode.current === 'shape') {
       const draft = localDraft.current
       if (draft && draft.kind === 'shape') {
-        let { x0, y0, x1, y1 } = draft
-        const dist = Math.hypot(x1 - x0, y1 - y0)
-        if (dist < 10 / s.camera.zoom) {
-          // tap -> default size
+        if (Math.hypot(draft.x1 - draft.x0, draft.y1 - draft.y0) < 10 / s.camera.zoom) {
+          // plain tap with a shape tool -> leave creation mode (back to
+          // select) instead of stamping a default-size shape
+          s.setTool('select')
+        } else {
+          const { x0, y0, x1, y1 } = draft
           if (draft.tool === 'arrow') {
-            // horizontal arrow through the tap point
-            x0 = draft.x0 - 70
-            y0 = draft.y0
-            x1 = draft.x0 + 70
-            y1 = draft.y0
+            // keep direction: start = press point, w/h = signed deltas so the
+            // arrowhead points the way it was drawn (any of the 4 quadrants)
+            s.addElements([
+              {
+                id: uid(),
+                type: 'arrow',
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+                color: draft.color,
+                strokeWidth: draft.width,
+              },
+            ])
           } else if (draft.tool === 'line') {
-            // horizontal segment through the tap point
-            x0 = draft.x0 - 70
-            y0 = draft.y0
-            x1 = draft.x0 + 70
-            y1 = draft.y0
+            s.addElements([
+              {
+                id: uid(),
+                type: 'line',
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+                color: draft.color,
+                strokeWidth: draft.width,
+                dashed: draft.dashed === true,
+              },
+            ])
           } else {
-            x0 = draft.x0 - 70
-            y0 = draft.y0 - 45
-            x1 = draft.x0 + 70
-            y1 = draft.y0 + 45
+            const r = normRect(x0, y0, x1, y1)
+            s.addElements([
+              {
+                id: uid(),
+                type: draft.tool,
+                x: r.x,
+                y: r.y,
+                w: r.w,
+                h: r.h,
+                color: draft.color,
+                strokeWidth: draft.width,
+              },
+            ])
           }
         }
-        if (draft.tool === 'arrow') {
-          // keep direction: start = press point, w/h = signed deltas so the
-          // arrowhead points the way it was drawn (any of the 4 quadrants)
-          s.addElements([
-            {
-              id: uid(),
-              type: 'arrow',
-              x: x0,
-              y: y0,
-              w: x1 - x0,
-              h: y1 - y0,
-              color: draft.color,
-              strokeWidth: draft.width,
-            },
-          ])
-        } else if (draft.tool === 'line') {
-          s.addElements([
-            {
-              id: uid(),
-              type: 'line',
-              x: x0,
-              y: y0,
-              w: x1 - x0,
-              h: y1 - y0,
-              color: draft.color,
-              strokeWidth: draft.width,
-              dashed: draft.dashed === true,
-            },
-          ])
-        } else {
-          const r = normRect(x0, y0, x1, y1)
-          s.addElements([
-            {
-              id: uid(),
-              type: draft.tool,
-              x: r.x,
-              y: r.y,
-              w: r.w,
-              h: r.h,
-              color: draft.color,
-              strokeWidth: draft.width,
-            },
-          ])
-        }
       } else if (draft && draft.kind === 'solid3') {
-        let { x0, y0, x1, y1 } = draft
-        if (Math.hypot(x1 - x0, y1 - y0) < 10 / s.camera.zoom) {
-          // tap -> default-size cube
-          x0 = draft.x0 - 110
-          y0 = draft.y0 - 80
-          x1 = draft.x0 + 110
-          y1 = draft.y0 + 80
+        if (Math.hypot(draft.x1 - draft.x0, draft.y1 - draft.y0) < 10 / s.camera.zoom) {
+          // tap on empty space with the 3D tool -> leave creation mode
+          s.setTool('select')
+        } else {
+          const { x0, y0, x1, y1 } = draft
+          const el = createSolid(uid(), draft.shape, x0, y0, x1, y1, draft.color, draft.width)
+          s.addElements([el])
+          s.select(el.id)
         }
-        const el = createSolid(uid(), draft.shape, x0, y0, x1, y1, draft.color, draft.width)
-        s.addElements([el])
-        s.select(el.id)
       }
       localDraft.current = null
     } else if (mode.current === 'vertex' && vertexCtx.current) {

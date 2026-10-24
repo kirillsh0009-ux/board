@@ -154,8 +154,9 @@ export function edgeDashed(geom: Solid3Geom, el: Solid3Element, ei: number): boo
 
 /**
  * Build a solid from a drag rect (any direction). Cube fits a square into the
- * drag (anchored bottom-center); box/prism/pyramid use the rect as the front
- * face / base; depth is half of the smaller side.
+ * drag (anchored bottom-center); box uses the rect as the front face; prism
+ * and pyramid use the rect as their base footprint on the ground plane; depth
+ * is half of the smaller side.
  */
 export function createSolid(
   id: string,
@@ -197,21 +198,25 @@ export function createSolid(
     )
     F.push([0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [3, 2, 6, 7], [1, 2, 6, 5], [0, 3, 7, 4])
   } else if (kind === 'prism') {
+    // prism standing on its triangular base: base ABC on the ground plane
+    // (front edge AB, rear vertex C pushed back by D), top triangle directly
+    // above — the classic upright textbook drawing
     const D = 0.5 * Math.min(w, h)
+    const H = Math.max(h - PROJ_KY * D, h * 0.3)
     V.push(
       { x, y: y + h, z: 0 },
       { x: x + w, y: y + h, z: 0 },
-      { x: x + w / 2, y, z: 0 },
-      { x, y: y + h, z: D },
-      { x: x + w, y: y + h, z: D },
-      { x: x + w / 2, y, z: D }
+      { x: x + w / 2, y: y + h, z: D },
+      { x, y: y + h - H, z: 0 },
+      { x: x + w, y: y + h - H, z: 0 },
+      { x: x + w / 2, y: y + h - H, z: D }
     )
     E.push(
       { a: 0, b: 1 }, { a: 1, b: 2 }, { a: 2, b: 0 },
       { a: 3, b: 4 }, { a: 4, b: 5 }, { a: 5, b: 3 },
       { a: 0, b: 3 }, { a: 1, b: 4 }, { a: 2, b: 5 }
     )
-    F.push([0, 1, 2], [3, 4, 5], [0, 1, 4, 3], [0, 2, 5, 3], [1, 2, 5, 4])
+    F.push([0, 1, 2], [3, 4, 5], [0, 1, 4, 3], [1, 2, 5, 4], [2, 0, 3, 5])
   } else {
     // pyramid: triangular base on the ground plane (front edge AB, rear vertex
     // C pushed back by D), apex S above the base centroid — the classic
